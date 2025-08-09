@@ -339,15 +339,13 @@ func (ds *LinqDbSet[T]) ThenByFieldDescending(fieldName string) *LinqDbSet[T] {
 // Add - EF Core: context.Users.Add(user)
 func (ds *LinqDbSet[T]) Add(entity T) {
 	if ds.context != nil {
-		// Use reflection to call the change tracker
+		// Use the public AddEntity method
 		ctxValue := reflect.ValueOf(ds.context)
-		changeTrackerField := ctxValue.Elem().FieldByName("changeTracker")
-		if changeTrackerField.IsValid() {
-			addMethod := changeTrackerField.MethodByName("Add")
-			if addMethod.IsValid() {
-				addMethod.Call([]reflect.Value{
+		if ctxValue.Kind() == reflect.Ptr {
+			addEntityMethod := ctxValue.MethodByName("AddEntity")
+			if addEntityMethod.IsValid() {
+				addEntityMethod.Call([]reflect.Value{
 					reflect.ValueOf(entity),
-					reflect.ValueOf(EntityAdded),
 				})
 			}
 		}
@@ -365,13 +363,11 @@ func (ds *LinqDbSet[T]) AddRange(entities []T) {
 func (ds *LinqDbSet[T]) Update(entity T) {
 	if ds.context != nil {
 		ctxValue := reflect.ValueOf(ds.context)
-		changeTrackerField := ctxValue.Elem().FieldByName("changeTracker")
-		if changeTrackerField.IsValid() {
-			addMethod := changeTrackerField.MethodByName("Add")
-			if addMethod.IsValid() {
-				addMethod.Call([]reflect.Value{
+		if ctxValue.Kind() == reflect.Ptr {
+			updateEntityMethod := ctxValue.MethodByName("UpdateEntity")
+			if updateEntityMethod.IsValid() {
+				updateEntityMethod.Call([]reflect.Value{
 					reflect.ValueOf(entity),
-					reflect.ValueOf(EntityModified),
 				})
 			}
 		}
@@ -389,13 +385,11 @@ func (ds *LinqDbSet[T]) UpdateRange(entities []T) {
 func (ds *LinqDbSet[T]) Remove(entity T) {
 	if ds.context != nil {
 		ctxValue := reflect.ValueOf(ds.context)
-		changeTrackerField := ctxValue.Elem().FieldByName("changeTracker")
-		if changeTrackerField.IsValid() {
-			addMethod := changeTrackerField.MethodByName("Add")
-			if addMethod.IsValid() {
-				addMethod.Call([]reflect.Value{
+		if ctxValue.Kind() == reflect.Ptr {
+			removeEntityMethod := ctxValue.MethodByName("RemoveEntity")
+			if removeEntityMethod.IsValid() {
+				removeEntityMethod.Call([]reflect.Value{
 					reflect.ValueOf(entity),
-					reflect.ValueOf(EntityDeleted),
 				})
 			}
 		}

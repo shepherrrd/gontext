@@ -79,17 +79,28 @@ func (ctx *DbContext) GetDbSet(entityType reflect.Type) *DbSet {
 func (ctx *DbContext) SaveChanges() error {
 	return ctx.db.Transaction(func(tx *gorm.DB) error {
 		for _, changes := range ctx.changeTracker.GetChanges() {
+			entity := changes.Entity
+			
+			// Ensure we have a pointer for GORM operations
+			entityValue := reflect.ValueOf(entity)
+			if entityValue.Kind() != reflect.Ptr {
+				// Create a pointer to the entity
+				entityPtr := reflect.New(entityValue.Type())
+				entityPtr.Elem().Set(entityValue)
+				entity = entityPtr.Interface()
+			}
+			
 			switch changes.State {
 			case EntityAdded:
-				if err := tx.Create(changes.Entity).Error; err != nil {
+				if err := tx.Create(entity).Error; err != nil {
 					return err
 				}
 			case EntityModified:
-				if err := tx.Save(changes.Entity).Error; err != nil {
+				if err := tx.Save(entity).Error; err != nil {
 					return err
 				}
 			case EntityDeleted:
-				if err := tx.Delete(changes.Entity).Error; err != nil {
+				if err := tx.Delete(entity).Error; err != nil {
 					return err
 				}
 			}
@@ -140,4 +151,19 @@ func (ctx *DbContext) EnsureCreated() error {
 		}
 	}
 	return nil
+}
+
+// AddEntity adds an entity to the change tracker
+func (ctx *DbContext) AddEntity(entity interface{}) {
+	ctx.changeTracker.Add(entity, EntityAdded)
+}
+
+// UpdateEntity marks an entity as modified
+func (ctx *DbContext) UpdateEntity(entity interface{}) {
+	ctx.changeTracker.Add(entity, EntityModified)
+}
+
+// RemoveEntity marks an entity for deletion
+func (ctx *DbContext) RemoveEntity(entity interface{}) {
+	ctx.changeTracker.Add(entity, EntityDeleted)
 }

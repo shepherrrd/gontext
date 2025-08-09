@@ -8,6 +8,7 @@ import (
 
 	"github.com/shepherrrd/gontext"
 	"github.com/shepherrrd/gontext/internal/migrations"
+	"github.com/shepherrrd/gontext/internal/discovery"
 )
 
 func main() {
@@ -119,8 +120,8 @@ func addMigration(name string) {
 		os.Exit(1)
 	}
 
-	// Create context and migration manager
-	ctx, err := gontext.NewDbContext(connectionString, "postgres")
+	// Create context with entity discovery
+	ctx, err := createContextWithEntityDiscovery(connectionString, projectRoot)
 	if err != nil {
 		fmt.Printf("❌ Error creating database context: %v\n", err)
 		os.Exit(1)
@@ -412,4 +413,85 @@ func showDatabaseUsage() {
 	fmt.Println("  database update         Apply pending migrations")
 	fmt.Println("  database drop           Drop all tables")
 	fmt.Println("  database rollback [n]   Rollback n migrations (default: 1)")
+}
+
+// createContextWithEntityDiscovery creates a context and discovers entities
+func createContextWithEntityDiscovery(connectionString, projectRoot string) (*gontext.DbContext, error) {
+	// First, try to find a design-time context factory (like EF Core)
+	dtFinder := discovery.NewDesignTimeContextFinder(projectRoot)
+	designTimeFile, err := dtFinder.FindDesignTimeContext()
+	if err == nil {
+		fmt.Printf("🔍 Found CreateDesignTimeContext in: %s\n", filepath.Base(designTimeFile))
+		fmt.Println("💡 GoNtext needs to execute your CreateDesignTimeContext function.")
+		fmt.Println("   Please run the following commands to generate migrations:")
+		fmt.Println()
+		fmt.Printf("   cd %s\n", projectRoot)
+		fmt.Println("   go run . --gontext-design-time")
+		fmt.Println()
+		fmt.Println("   Or create a simple migration runner:")
+		fmt.Println("   go run . migration:add InitialCreate  # if you have custom CLI")
+		fmt.Println()
+		
+		// For now, return an empty context and let the user know what to do
+		ctx, err := gontext.NewDbContext(connectionString, "postgres")
+		if err != nil {
+			return nil, err
+		}
+		return ctx, nil
+	}
+
+	// Fallback: Scan for DbContext structs in the project
+	scanner := discovery.NewContextScanner(projectRoot)
+	contextInfo, err := scanner.FindDefaultContext()
+	if err != nil {
+		fmt.Printf("⚠️ No entities found: %v\n", err)
+		fmt.Println()
+		fmt.Println("💡 GoNtext CLI needs entity information to generate migrations.")
+		fmt.Println("   Choose one of these approaches:")
+		fmt.Println()
+		fmt.Println("   📋 Option 1: Create a design-time context (Recommended - like EF Core)")
+		fmt.Println("   Create a file with this function:")
+		fmt.Println()
+		fmt.Println("   func CreateDesignTimeContext() (*gontext.DbContext, error) {")
+		fmt.Println("       ctx, err := gontext.NewDbContext(connectionString, \"postgres\")")
+		fmt.Println("       if err != nil { return nil, err }")
+		fmt.Println("       gontext.RegisterEntity[User](ctx)")
+		fmt.Println("       gontext.RegisterEntity[Post](ctx)  // Register all entities")
+		fmt.Println("       return ctx, nil")
+		fmt.Println("   }")
+		fmt.Println()
+		fmt.Println("   📋 Option 2: Create a DbContext struct with LinqDbSet fields")
+		fmt.Println("   type MyContext struct {")
+		fmt.Println("       *gontext.DbContext")
+		fmt.Println("       Users *gontext.LinqDbSet[User]")
+		fmt.Println("       Posts *gontext.LinqDbSet[Post]")
+		fmt.Println("   }")
+		fmt.Println()
+		
+		ctx, err := gontext.NewDbContext(connectionString, "postgres")
+		if err != nil {
+			return nil, err
+		}
+		return ctx, nil // Return empty context
+	}
+
+	fmt.Printf("🔍 Found DbContext: %s\n", contextInfo.Name)
+	fmt.Printf("📊 Discovered %d entities: ", len(contextInfo.Entities))
+	for i, entity := range contextInfo.Entities {
+		if i > 0 {
+			fmt.Print(", ")
+		}
+		fmt.Print(entity.TypeName)
+	}
+	fmt.Println()
+	
+	fmt.Println("⚠️ Entity discovery found entities but cannot load them automatically.")
+	fmt.Println("💡 Please create a CreateDesignTimeContext function to properly register entities.")
+
+	// Return empty context for now
+	ctx, err := gontext.NewDbContext(connectionString, "postgres")
+	if err != nil {
+		return nil, err
+	}
+	return ctx, nil
 }
