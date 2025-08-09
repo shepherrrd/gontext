@@ -33,7 +33,7 @@ func NewEntityModel(entityType reflect.Type) *EntityModel {
 
 	entity := &EntityModel{
 		Name:      entityType.Name(),
-		TableName: toSnakeCase(entityType.Name()),
+		TableName: entityType.Name(), // Use Pascal case (struct name) instead of snake_case
 		Type:      entityType,
 		Fields:    make(map[string]FieldModel),
 	}

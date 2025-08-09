@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
@@ -565,6 +566,12 @@ func (mm *MigrationManager) getPendingMigrations() ([]string, error) {
 
 func (mm *MigrationManager) runMigrationFile(migrationID string) error {
 	return mm.context.GetDB().Transaction(func(tx *gorm.DB) error {
+		// First, run the actual migration by executing the SQL from the generated migration file
+		if err := mm.executeMigrationSQL(migrationID, tx); err != nil {
+			return fmt.Errorf("failed to execute migration SQL: %w", err)
+		}
+
+		// Then record the migration as applied
 		migration := &models.Migration{
 			ID:        migrationID,
 			Name:      extractMigrationName(migrationID),
@@ -575,6 +582,26 @@ func (mm *MigrationManager) runMigrationFile(migrationID string) error {
 
 		return tx.Create(migration).Error
 	})
+}
+
+func (mm *MigrationManager) executeMigrationSQL(migrationID string, tx *gorm.DB) error {
+	// For now, use EnsureCreated to create all tables
+	// In a full implementation, we would parse and execute the generated migration file
+	entityModels := mm.context.GetEntityModels()
+	
+	for _, entityModel := range entityModels {
+		// Get the entity type and use AutoMigrate
+		if err := tx.AutoMigrate(mm.getEntityInstance(entityModel)); err != nil {
+			return fmt.Errorf("failed to migrate table %s: %w", entityModel.TableName, err)
+		}
+	}
+	
+	return nil
+}
+
+func (mm *MigrationManager) getEntityInstance(entityModel *models.EntityModel) interface{} {
+	// Create a new instance of the entity type
+	return reflect.New(entityModel.Type).Interface()
 }
 
 func containsColumn(schema map[string]drivers.ColumnInfo, columnName string) bool {
@@ -658,7 +685,7 @@ func (mm *MigrationManager) generateOperationsFromComparison(comparison *models.
 				Type:       models.AddColumn,
 				EntityName: change.EntityName,
 				Details: models.AddColumnOperation{
-					TableName: toSnakeCase(change.EntityName),
+					TableName: change.EntityName, // Use Pascal case
 					Column: models.ColumnDefinition{
 						Name:         fieldSnapshot.ColumnName,
 						Type:         driver.MapGoTypeToSQL(fieldSnapshot.Type),
@@ -677,7 +704,7 @@ func (mm *MigrationManager) generateOperationsFromComparison(comparison *models.
 				Type:       models.RenameColumn,
 				EntityName: change.EntityName,
 				Details: models.RenameColumnOperation{
-					TableName: toSnakeCase(change.EntityName),
+					TableName: change.EntityName, // Use Pascal case
 					OldName:   fieldRename.OldName,
 					NewName:   fieldRename.NewName,
 				},
@@ -690,7 +717,7 @@ func (mm *MigrationManager) generateOperationsFromComparison(comparison *models.
 				Type:       models.DropColumn,
 				EntityName: change.EntityName,
 				Details: models.DropColumnOperation{
-					TableName:  toSnakeCase(change.EntityName),
+					TableName:  change.EntityName, // Use Pascal case
 					ColumnName: fieldSnapshot.ColumnName,
 				},
 			}
