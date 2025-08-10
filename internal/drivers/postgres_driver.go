@@ -6,12 +6,17 @@ import (
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"github.com/shepherrrd/gontext/internal/query"
 )
 
-type PostgreSQLDriver struct{}
+type PostgreSQLDriver struct{
+	plugin *query.PostgreSQLPlugin
+}
 
 func NewPostgreSQLDriver() *PostgreSQLDriver {
-	return &PostgreSQLDriver{}
+	return &PostgreSQLDriver{
+		plugin: query.NewPostgreSQLPlugin(),
+	}
 }
 
 func (p *PostgreSQLDriver) Name() string {
@@ -19,7 +24,29 @@ func (p *PostgreSQLDriver) Name() string {
 }
 
 func (p *PostgreSQLDriver) Connect(connectionString string) (*gorm.DB, error) {
-	return gorm.Open(postgres.Open(connectionString), &gorm.Config{})
+	// Create PostgreSQL naming strategy for Pascal case
+	namingStrategy := query.NewPostgreSQLNamingStrategy()
+	
+	db, err := gorm.Open(postgres.Open(connectionString), &gorm.Config{
+		NamingStrategy: namingStrategy,
+	})
+	
+	if err != nil {
+		return nil, err
+	}
+	
+	// Install the PostgreSQL plugin
+	err = db.Use(p.plugin)
+	if err != nil {
+		return nil, err
+	}
+	
+	return db, nil
+}
+
+// GetPlugin returns the PostgreSQL plugin for query translation
+func (p *PostgreSQLDriver) GetPlugin() *query.PostgreSQLPlugin {
+	return p.plugin
 }
 
 func (p *PostgreSQLDriver) GetSQLDB(db *gorm.DB) (*sql.DB, error) {

@@ -3,10 +3,12 @@ package migrations
 import (
 	"crypto/md5"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -16,6 +18,49 @@ import (
 	"github.com/shepherrrd/gontext/internal/models"
 )
 
+// migrationFields provides statically typed field name access for Migration struct
+type migrationFields struct {
+	Id        string
+	Name      string  
+	AppliedAt string
+	Version   string
+	Checksum  string
+	DependsOn string
+}
+
+// getMigrationFields returns the actual field names from the Migration struct using reflection
+// This ensures type safety - if field names change in the struct, this will update automatically
+func getMigrationFields() migrationFields {
+	var m models.Migration
+	t := reflect.TypeOf(m)
+	
+	fields := migrationFields{}
+	fieldValue := reflect.ValueOf(&fields).Elem()
+	
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		fieldName := field.Name
+		
+		// Set the corresponding field in migrationFields to the actual struct field name
+		switch fieldName {
+		case "Id":
+			fieldValue.FieldByName("Id").SetString(fieldName)
+		case "Name":
+			fieldValue.FieldByName("Name").SetString(fieldName)
+		case "AppliedAt":
+			fieldValue.FieldByName("AppliedAt").SetString(fieldName)
+		case "Version":
+			fieldValue.FieldByName("Version").SetString(fieldName)
+		case "Checksum":
+			fieldValue.FieldByName("Checksum").SetString(fieldName)
+		case "DependsOn":
+			fieldValue.FieldByName("DependsOn").SetString(fieldName)
+		}
+	}
+	
+	return fields
+}
+
 type MigrationManager struct {
 	context       *context.DbContext
 	migrationsDir string
@@ -23,7 +68,7 @@ type MigrationManager struct {
 }
 
 type MigrationFile struct {
-	ID          string
+	Id          string
 	Name        string
 	Timestamp   string
 	Operations  []models.MigrationOperation
@@ -99,7 +144,7 @@ func (mm *MigrationManager) AddMigration(name string) error {
 	migrationID := fmt.Sprintf("%s_%s", timestamp, strings.ToLower(strings.ReplaceAll(name, " ", "_")))
 
 	migration := &MigrationFile{
-		ID:         migrationID,
+		Id:         migrationID,
 		Name:       name,
 		Timestamp:  timestamp,
 		Operations: operations,
@@ -142,7 +187,8 @@ func (mm *MigrationManager) RemoveLastMigration() error {
 	}
 
 	// Remove from database if it was applied
-	err = mm.context.GetDB().Where("id = ?", lastMigration).Delete(&models.Migration{}).Error
+	fields := getMigrationFields()
+	err = mm.context.GetDB().Where(`"`+fields.Id+`" = ?`, lastMigration).Delete(&models.Migration{}).Error
 	if err != nil {
 		return fmt.Errorf("failed to remove migration from database: %w", err)
 	}
@@ -155,7 +201,8 @@ func (mm *MigrationManager) RemoveLastMigration() error {
 
 func (mm *MigrationManager) ListMigrations() error {
 	appliedMigrations := []string{}
-	err := mm.context.GetDB().Model(&models.Migration{}).Order("applied_at").Pluck("id", &appliedMigrations).Error
+	fields := getMigrationFields()
+	err := mm.context.GetDB().Model(&models.Migration{}).Order(`"` + fields.AppliedAt + `"`).Pluck(`"` + fields.Id + `"`, &appliedMigrations).Error
 	if err != nil {
 		return err
 	}
@@ -181,9 +228,9 @@ func (mm *MigrationManager) ListMigrations() error {
 func (mm *MigrationManager) DropDatabase() error {
 	entityModels := mm.context.GetEntityModels()
 	
-	// Drop all tables in reverse order
+	// Drop all tables in reverse order using double quotes for PostgreSQL case-sensitive names
 	for _, entity := range entityModels {
-		err := mm.context.GetDB().Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", entity.TableName)).Error
+		err := mm.context.GetDB().Exec(fmt.Sprintf("DROP TABLE IF EXISTS \"%s\" CASCADE", entity.TableName)).Error
 		if err != nil {
 			return fmt.Errorf("failed to drop table %s: %w", entity.TableName, err)
 		}
@@ -200,7 +247,9 @@ func (mm *MigrationManager) DropDatabase() error {
 
 func (mm *MigrationManager) RollbackDatabase(steps int) error {
 	appliedMigrations := []models.Migration{}
-	err := mm.context.GetDB().Order("applied_at DESC").Limit(steps).Find(&appliedMigrations).Error
+	fields := getMigrationFields()
+	// Get most recent migrations first (reverse chronological order)
+	err := mm.context.GetDB().Order(`"`+fields.AppliedAt+`" DESC`).Limit(steps).Find(&appliedMigrations).Error
 	if err != nil {
 		return err
 	}
@@ -210,13 +259,27 @@ func (mm *MigrationManager) RollbackDatabase(steps int) error {
 	}
 
 	for _, migration := range appliedMigrations {
-		fmt.Printf("Rolling back migration: %s\n", migration.ID)
+		fmt.Printf("Rolling back migration: %s\n", migration.Id)
 		
-		// Execute rollback operations (this would require implementing Down() methods)
-		// For now, just remove from migrations table
-		err := mm.context.GetDB().Delete(&migration).Error
+		// Execute rollback in transaction
+		err := mm.context.GetDB().Transaction(func(tx *gorm.DB) error {
+			// Execute the rollback operations
+			if err := mm.executeRollbackOperations(migration.Id, tx); err != nil {
+				return fmt.Errorf("failed to execute rollback operations: %w", err)
+			}
+
+			// Remove migration record from database using Where clause
+			fields := getMigrationFields()
+			err := tx.Where(`"`+fields.Id+`" = ?`, migration.Id).Delete(&models.Migration{}).Error
+			if err != nil {
+				return fmt.Errorf("failed to remove migration record: %w", err)
+			}
+
+			return nil
+		})
+		
 		if err != nil {
-			return fmt.Errorf("failed to rollback migration %s: %w", migration.ID, err)
+			return fmt.Errorf("failed to rollback migration %s: %w", migration.Id, err)
 		}
 	}
 
@@ -360,7 +423,7 @@ func (mm *MigrationManager) generateMigrationFile(migration *MigrationFile) erro
 
 	migration.Checksum = fmt.Sprintf("%x", md5.Sum([]byte(content)))
 
-	filePath := filepath.Join(mm.migrationsDir, migration.ID+".go")
+	filePath := filepath.Join(mm.migrationsDir, migration.Id+".go")
 	return os.WriteFile(filePath, []byte(content), 0644)
 }
 
@@ -381,7 +444,7 @@ func (m *Migration%s) ID() string {
 }
 
 func (m *Migration%s) Up(db *gorm.DB) error {
-`, mm.packageName, migration.Timestamp, migration.Timestamp, migration.ID, migration.Timestamp))
+`, mm.packageName, migration.Timestamp, migration.Timestamp, migration.Id, migration.Timestamp))
 
 	// Generate Up operations
 	for _, op := range migration.Operations {
@@ -414,7 +477,7 @@ func (mm *MigrationManager) generateOperationSQL(op models.MigrationOperation, i
 		if isRollback {
 			if createOp, ok := op.Details.(models.CreateTableOperation); ok {
 				return fmt.Sprintf(`	// Drop table %s
-	if err := db.Exec("DROP TABLE IF EXISTS %s").Error; err != nil {
+	if err := db.Exec("DROP TABLE IF EXISTS \"%s\"").Error; err != nil {
 		return err
 	}
 `, op.EntityName, createOp.TableName)
@@ -422,18 +485,20 @@ func (mm *MigrationManager) generateOperationSQL(op models.MigrationOperation, i
 		} else {
 			if createOp, ok := op.Details.(models.CreateTableOperation); ok {
 				sql := mm.generateCreateTableSQL(createOp)
+				// Escape quotes in the SQL for Go string literal
+				escapedSQL := strings.ReplaceAll(sql, `"`, `\"`)
 				return fmt.Sprintf(`	// Create table %s
 	if err := db.Exec("%s").Error; err != nil {
 		return err
 	}
-`, op.EntityName, sql)
+`, op.EntityName, escapedSQL)
 			}
 		}
 	case models.AddColumn:
 		if isRollback {
 			if addOp, ok := op.Details.(models.AddColumnOperation); ok {
 				return fmt.Sprintf(`	// Remove column %s from %s
-	if err := db.Exec("ALTER TABLE %s DROP COLUMN %s").Error; err != nil {
+	if err := db.Exec("ALTER TABLE \\\"%s\\\" DROP COLUMN \\\"%s\\\"").Error; err != nil {
 		return err
 	}
 `, addOp.Column.Name, addOp.TableName, addOp.TableName, addOp.Column.Name)
@@ -445,7 +510,7 @@ func (mm *MigrationManager) generateOperationSQL(op models.MigrationOperation, i
 					nullable = " NOT NULL"
 				}
 				return fmt.Sprintf(`	// Add column %s to %s
-	if err := db.Exec("ALTER TABLE %s ADD COLUMN %s %s%s").Error; err != nil {
+	if err := db.Exec("ALTER TABLE \\\"%s\\\" ADD COLUMN \\\"%s\\\" %s%s").Error; err != nil {
 		return err
 	}
 `, addOp.Column.Name, addOp.TableName, addOp.TableName, addOp.Column.Name, addOp.Column.Type, nullable)
@@ -455,13 +520,13 @@ func (mm *MigrationManager) generateOperationSQL(op models.MigrationOperation, i
 		if renameOp, ok := op.Details.(models.RenameColumnOperation); ok {
 			if isRollback {
 				return fmt.Sprintf(`	// Rename column %s back to %s in %s
-	if err := db.Exec("ALTER TABLE %s RENAME COLUMN %s TO %s").Error; err != nil {
+	if err := db.Exec("ALTER TABLE \\\"%s\\\" RENAME COLUMN \\\"%s\\\" TO \\\"%s\\\"").Error; err != nil {
 		return err
 	}
 `, renameOp.NewName, renameOp.OldName, renameOp.TableName, renameOp.TableName, renameOp.NewName, renameOp.OldName)
 			} else {
 				return fmt.Sprintf(`	// Rename column %s to %s in %s
-	if err := db.Exec("ALTER TABLE %s RENAME COLUMN %s TO %s").Error; err != nil {
+	if err := db.Exec("ALTER TABLE \\\"%s\\\" RENAME COLUMN \\\"%s\\\" TO \\\"%s\\\"").Error; err != nil {
 		return err
 	}
 `, renameOp.OldName, renameOp.NewName, renameOp.TableName, renameOp.TableName, renameOp.OldName, renameOp.NewName)
@@ -473,13 +538,13 @@ func (mm *MigrationManager) generateOperationSQL(op models.MigrationOperation, i
 
 func (mm *MigrationManager) generateCreateTableSQL(createOp models.CreateTableOperation) string {
 	var sql strings.Builder
-	sql.WriteString(fmt.Sprintf("CREATE TABLE %s (", createOp.TableName))
+	sql.WriteString(fmt.Sprintf("CREATE TABLE \"%s\" (", createOp.TableName))
 	
 	var columns []string
 	var primaryKeys []string
 	
 	for _, col := range createOp.Columns {
-		columnDef := fmt.Sprintf("%s %s", col.Name, col.Type)
+		columnDef := fmt.Sprintf("\"%s\" %s", col.Name, col.Type)
 		if !col.IsNullable {
 			columnDef += " NOT NULL"
 		}
@@ -492,7 +557,7 @@ func (mm *MigrationManager) generateCreateTableSQL(createOp models.CreateTableOp
 		columns = append(columns, columnDef)
 		
 		if col.IsPrimary {
-			primaryKeys = append(primaryKeys, col.Name)
+			primaryKeys = append(primaryKeys, fmt.Sprintf("\"%s\"", col.Name))
 		}
 	}
 	
@@ -543,7 +608,8 @@ func (mm *MigrationManager) getPendingMigrations() ([]string, error) {
 	}
 
 	var appliedMigrations []string
-	err = mm.context.GetDB().Model(&models.Migration{}).Pluck("id", &appliedMigrations).Error
+	fields := getMigrationFields()
+	err = mm.context.GetDB().Model(&models.Migration{}).Pluck(`"`+fields.Id+`"`, &appliedMigrations).Error
 	if err != nil {
 		return nil, err
 	}
@@ -561,23 +627,44 @@ func (mm *MigrationManager) getPendingMigrations() ([]string, error) {
 		}
 	}
 
+	// Sort pending migrations by timestamp (chronological order)
+	// Migration IDs format: 20250810160535_migrationname
+	sort.Slice(pending, func(i, j int) bool {
+		timestampI := extractTimestamp(pending[i])
+		timestampJ := extractTimestamp(pending[j])
+		return timestampI < timestampJ
+	})
+
+	// Validate dependency order - ensure no migration depends on a later migration
+	if err := mm.validateMigrationDependencies(pending, appliedMigrations); err != nil {
+		return nil, fmt.Errorf("migration dependency validation failed: %w", err)
+	}
+
 	return pending, nil
 }
 
 func (mm *MigrationManager) runMigrationFile(migrationID string) error {
 	return mm.context.GetDB().Transaction(func(tx *gorm.DB) error {
-		// First, run the actual migration by executing the SQL from the generated migration file
-		if err := mm.executeMigrationSQL(migrationID, tx); err != nil {
-			return fmt.Errorf("failed to execute migration SQL: %w", err)
+		// Execute the migration operations directly from the current state
+		// This is a simplified approach - in a full implementation, we would parse and execute the Go migration file
+		if err := mm.executeMigrationOperations(tx); err != nil {
+			return fmt.Errorf("failed to execute migration operations: %w", err)
 		}
 
-		// Then record the migration as applied
+		// Find the most recent migration to set dependency
+		var dependsOn *string
+		if lastMigration, err := mm.getLastAppliedMigration(tx); err == nil && lastMigration != nil {
+			dependsOn = &lastMigration.Id
+		}
+
+		// Record the migration as applied
 		migration := &models.Migration{
-			ID:        migrationID,
+			Id:        migrationID,
 			Name:      extractMigrationName(migrationID),
 			AppliedAt: time.Now(),
 			Version:   1,
 			Checksum:  "",
+			DependsOn: dependsOn,
 		}
 
 		return tx.Create(migration).Error
@@ -585,14 +672,89 @@ func (mm *MigrationManager) runMigrationFile(migrationID string) error {
 }
 
 func (mm *MigrationManager) executeMigrationSQL(migrationID string, tx *gorm.DB) error {
-	// For now, use EnsureCreated to create all tables
-	// In a full implementation, we would parse and execute the generated migration file
+	// For now, let's use a simpler approach - execute the operations from the current migration
+	// In the future, this could be enhanced to parse and execute the actual migration file
+	
+	// Load the migration file operations that were already generated
+	previousSnapshot, err := mm.loadLastSnapshot()
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to load previous snapshot: %w", err)
+	}
+
+	currentSnapshot := models.NewModelSnapshot(mm.context.GetEntityModels())
+	var operations []models.MigrationOperation
+
+	if previousSnapshot == nil {
+		// First migration - create all tables
+		operations, err = mm.generateInitialOperations()
+		if err != nil {
+			return fmt.Errorf("failed to generate initial operations: %w", err)
+		}
+	} else {
+		// Compare snapshots to find changes
+		comparison := currentSnapshot.Compare(previousSnapshot)
+		if comparison.HasChanges {
+			operations, err = mm.generateOperationsFromComparison(comparison)
+			if err != nil {
+				return fmt.Errorf("failed to generate operations from comparison: %w", err)
+			}
+		}
+	}
+
+	// Execute the operations
+	for _, op := range operations {
+		sql := mm.generateOperationExecutionSQL(op)
+		if sql != "" {
+			fmt.Printf("Executing SQL: %s\n", sql)
+			if err := tx.Exec(sql).Error; err != nil {
+				return fmt.Errorf("failed to execute SQL: %s, error: %w", sql, err)
+			}
+		}
+	}
+	
+	return nil
+}
+
+func (mm *MigrationManager) executeMigrationOperations(tx *gorm.DB) error {
+	// For initial migrations, use GORM's AutoMigrate to create tables
+	entityModelsMap := mm.context.GetEntityModels()
+	
+	for _, entityModel := range entityModelsMap {
+		// Get a pointer to a new instance of the entity type
+		entityPtr := reflect.New(entityModel.Type).Interface()
+		
+		fmt.Printf("Creating table for entity: %s (table: %s)\n", entityModel.Name, entityModel.TableName)
+		if err := tx.AutoMigrate(entityPtr); err != nil {
+			return fmt.Errorf("failed to auto-migrate entity %s: %w", entityModel.Name, err)
+		}
+	}
+	
+	return nil
+}
+
+func (mm *MigrationManager) executeRollbackOperations(migrationId string, tx *gorm.DB) error {
+	// For initial migrations, rollback means dropping all entity tables
+	// This is a simplified approach - in a full implementation, we would parse the Down() method from the migration file
+	
 	entityModels := mm.context.GetEntityModels()
 	
+	// Convert map to slice for ordered dropping
+	var entityList []*models.EntityModel
 	for _, entityModel := range entityModels {
-		// Get the entity type and use AutoMigrate
-		if err := tx.AutoMigrate(mm.getEntityInstance(entityModel)); err != nil {
-			return fmt.Errorf("failed to migrate table %s: %w", entityModel.TableName, err)
+		entityList = append(entityList, entityModel)
+	}
+	
+	// Drop tables in reverse order to handle foreign key dependencies
+	for i := len(entityList) - 1; i >= 0; i-- {
+		entityModel := entityList[i]
+		tableName := entityModel.TableName
+		
+		fmt.Printf("Dropping table: %s\n", tableName)
+		
+		// Use quoted table name for PostgreSQL case sensitivity
+		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS \"%s\" CASCADE", tableName)
+		if err := tx.Exec(dropSQL).Error; err != nil {
+			return fmt.Errorf("failed to drop table %s: %w", tableName, err)
 		}
 	}
 	
@@ -602,6 +764,39 @@ func (mm *MigrationManager) executeMigrationSQL(migrationID string, tx *gorm.DB)
 func (mm *MigrationManager) getEntityInstance(entityModel *models.EntityModel) interface{} {
 	// Create a new instance of the entity type
 	return reflect.New(entityModel.Type).Interface()
+}
+
+func (mm *MigrationManager) generateOperationExecutionSQL(op models.MigrationOperation) string {
+	switch op.Type {
+	case models.CreateTable:
+		if createOp, ok := op.Details.(models.CreateTableOperation); ok {
+			return mm.generateCreateTableSQL(createOp)
+		}
+	case models.AddColumn:
+		if addOp, ok := op.Details.(models.AddColumnOperation); ok {
+			nullable := ""
+			if !addOp.Column.IsNullable {
+				nullable = " NOT NULL"
+			}
+			defaultVal := ""
+			if addOp.Column.DefaultValue != nil {
+				defaultVal = fmt.Sprintf(" DEFAULT %s", *addOp.Column.DefaultValue)
+			}
+			return fmt.Sprintf("ALTER TABLE \"%s\" ADD COLUMN \"%s\" %s%s%s", 
+				addOp.TableName, addOp.Column.Name, addOp.Column.Type, nullable, defaultVal)
+		}
+	case models.RenameColumn:
+		if renameOp, ok := op.Details.(models.RenameColumnOperation); ok {
+			return fmt.Sprintf("ALTER TABLE \"%s\" RENAME COLUMN \"%s\" TO \"%s\"", 
+				renameOp.TableName, renameOp.OldName, renameOp.NewName)
+		}
+	case models.DropColumn:
+		if dropOp, ok := op.Details.(models.DropColumnOperation); ok {
+			return fmt.Sprintf("ALTER TABLE \"%s\" DROP COLUMN \"%s\"", 
+				dropOp.TableName, dropOp.ColumnName)
+		}
+	}
+	return ""
 }
 
 func containsColumn(schema map[string]drivers.ColumnInfo, columnName string) bool {
@@ -615,6 +810,104 @@ func extractMigrationName(migrationID string) string {
 		return strings.ReplaceAll(parts[1], "_", " ")
 	}
 	return migrationID
+}
+
+// extractTimestamp extracts the timestamp from a migration ID
+// Migration ID format: 20250810160535_migrationname
+func extractTimestamp(migrationID string) string {
+	parts := strings.SplitN(migrationID, "_", 2)
+	if len(parts) > 0 {
+		return parts[0]
+	}
+	return migrationID
+}
+
+// getLastAppliedMigration gets the most recently applied migration for dependency tracking
+func (mm *MigrationManager) getLastAppliedMigration(tx *gorm.DB) (*models.Migration, error) {
+	var lastMigration models.Migration
+	fields := getMigrationFields()
+	
+	err := tx.Model(&models.Migration{}).
+		Order(`"`+fields.AppliedAt+`" DESC`).
+		First(&lastMigration).Error
+		
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil // No migrations applied yet
+		}
+		return nil, err
+	}
+	
+	return &lastMigration, nil
+}
+
+// validateMigrationDependencies ensures that migration dependencies are satisfied
+func (mm *MigrationManager) validateMigrationDependencies(pendingMigrations, appliedMigrations []string) error {
+	// Create a set of all available migrations (pending + applied)
+	availableMigrations := make(map[string]bool)
+	for _, migration := range appliedMigrations {
+		availableMigrations[migration] = true
+	}
+	for _, migration := range pendingMigrations {
+		availableMigrations[migration] = true
+	}
+	
+	// For timestamp-based dependencies, ensure chronological order
+	for i := 1; i < len(pendingMigrations); i++ {
+		currentTimestamp := extractTimestamp(pendingMigrations[i])
+		previousTimestamp := extractTimestamp(pendingMigrations[i-1])
+		
+		if currentTimestamp < previousTimestamp {
+			return fmt.Errorf("migration %s has timestamp %s which is earlier than previous migration %s with timestamp %s", 
+				pendingMigrations[i], currentTimestamp, pendingMigrations[i-1], previousTimestamp)
+		}
+	}
+	
+	// Check for chronological conflicts with applied migrations
+	if err := mm.detectChronologicalConflicts(pendingMigrations, appliedMigrations); err != nil {
+		return fmt.Errorf("chronological conflict detected: %w", err)
+	}
+	
+	fmt.Printf("✅ Migration dependency validation passed for %d pending migrations\n", len(pendingMigrations))
+	return nil
+}
+
+// detectChronologicalConflicts detects when pending migrations have timestamps that conflict with applied migrations
+func (mm *MigrationManager) detectChronologicalConflicts(pendingMigrations, appliedMigrations []string) error {
+	if len(appliedMigrations) == 0 {
+		return nil // No conflicts possible
+	}
+	
+	// Find the latest applied migration timestamp
+	var latestAppliedTimestamp string
+	for _, applied := range appliedMigrations {
+		timestamp := extractTimestamp(applied)
+		if timestamp > latestAppliedTimestamp {
+			latestAppliedTimestamp = timestamp
+		}
+	}
+	
+	// Check if any pending migration has an older timestamp than the latest applied
+	var conflicts []string
+	for _, pending := range pendingMigrations {
+		pendingTimestamp := extractTimestamp(pending)
+		if pendingTimestamp < latestAppliedTimestamp {
+			conflicts = append(conflicts, fmt.Sprintf("Migration %s (timestamp: %s) is older than latest applied migration (timestamp: %s)", 
+				pending, pendingTimestamp, latestAppliedTimestamp))
+		}
+	}
+	
+	if len(conflicts) > 0 {
+		fmt.Printf("⚠️  WARNING: Found %d chronological conflicts:\n", len(conflicts))
+		for _, conflict := range conflicts {
+			fmt.Printf("  - %s\n", conflict)
+		}
+		fmt.Println("💡 These migrations will be applied in timestamp order, which may cause issues if there are schema dependencies.")
+		fmt.Println("💡 Consider recreating these migrations with newer timestamps if they depend on recent schema changes.")
+		return nil // Return nil to continue with warning, not error
+	}
+	
+	return nil
 }
 
 // Snapshot management methods
@@ -685,7 +978,7 @@ func (mm *MigrationManager) generateOperationsFromComparison(comparison *models.
 				Type:       models.AddColumn,
 				EntityName: change.EntityName,
 				Details: models.AddColumnOperation{
-					TableName: change.EntityName, // Use Pascal case
+					TableName: change.EntityName, 
 					Column: models.ColumnDefinition{
 						Name:         fieldSnapshot.ColumnName,
 						Type:         driver.MapGoTypeToSQL(fieldSnapshot.Type),
@@ -704,7 +997,7 @@ func (mm *MigrationManager) generateOperationsFromComparison(comparison *models.
 				Type:       models.RenameColumn,
 				EntityName: change.EntityName,
 				Details: models.RenameColumnOperation{
-					TableName: change.EntityName, // Use Pascal case
+					TableName: change.EntityName, 
 					OldName:   fieldRename.OldName,
 					NewName:   fieldRename.NewName,
 				},

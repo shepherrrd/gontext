@@ -5,11 +5,12 @@ import (
 )
 
 type Migration struct {
-	ID          string    `gontext:"primary_key"`
+	Id          string    `gontext:"primary_key"`
 	Name        string    `gontext:"not_null"`
 	AppliedAt   time.Time `gontext:"not_null"`
 	Version     int       `gontext:"not_null"`
 	Checksum    string    `gontext:"not_null"`
+	DependsOn   *string   `gontext:"nullable"` // ID of the migration this depends on
 }
 
 type MigrationOperation struct {

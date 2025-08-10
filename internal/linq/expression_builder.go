@@ -5,6 +5,7 @@ import (
 	"reflect"
 
 	"gorm.io/gorm"
+	"github.com/shepherrrd/gontext/internal/query"
 )
 
 // Expression represents a LINQ expression
@@ -23,6 +24,8 @@ type LinqDbSet[T any] struct {
 	db         *gorm.DB
 	entityType reflect.Type
 	context    interface{} // Will hold the DbContext
+	translator *query.PostgreSQLQueryTranslator // For automatic PostgreSQL translation
+	tableName  string // Entity table name
 }
 
 func NewLinqDbSet[T any](db *gorm.DB) *LinqDbSet[T] {
@@ -36,6 +39,8 @@ func NewLinqDbSet[T any](db *gorm.DB) *LinqDbSet[T] {
 		db:         db,
 		entityType: entityType,
 		context:    nil, // Will be set when created from DbContext
+		translator: nil, // Will be set if PostgreSQL
+		tableName:  entityType.Name(),
 	}
 }
 
@@ -46,10 +51,36 @@ func NewLinqDbSetWithContext[T any](db *gorm.DB, ctx interface{}) *LinqDbSet[T] 
 		entityType = entityType.Elem()
 	}
 
+	// Check if this is a PostgreSQL database and set up automatic translation
+	var translator *query.PostgreSQLQueryTranslator
+	tableName := entityType.Name()
+	
+	// Get table name (check for TableName method)
+	if tabler, ok := interface{}(zero).(interface{ TableName() string }); ok {
+		tableName = tabler.TableName()
+	}
+	
+	// Detect PostgreSQL by checking the driver name
+	if db.Dialector.Name() == "postgres" {
+		translator = query.NewPostgreSQLQueryTranslator()
+		
+		// Register field names
+		var fieldNames []string
+		for i := 0; i < entityType.NumField(); i++ {
+			field := entityType.Field(i)
+			if field.PkgPath == "" { // exported field
+				fieldNames = append(fieldNames, field.Name)
+			}
+		}
+		translator.RegisterEntityFields(tableName, fieldNames)
+	}
+
 	return &LinqDbSet[T]{
 		db:         db,
 		entityType: entityType,
 		context:    ctx,
+		translator: translator,
+		tableName:  tableName,
 	}
 }
 
@@ -243,27 +274,33 @@ func (ds *LinqDbSet[T]) ById(id interface{}) (*T, error) {
 
 // WhereField - helper for field-based filtering - EF Core: context.Users.Where(x => x.Field == value)
 func (ds *LinqDbSet[T]) WhereField(fieldName string, value interface{}) *LinqDbSet[T] {
+	// Apply PostgreSQL translation if available
+	quotedFieldName := fieldName
+	if ds.translator != nil {
+		quotedFieldName = ds.translator.GetQuotedFieldName(fieldName)
+	}
+	
 	// Handle different comparison operators embedded in string values
 	if strValue, ok := value.(string); ok {
 		if len(strValue) > 1 && strValue[0] == '>' {
 			if strValue[1] == '=' {
-				ds.db = ds.db.Where(fmt.Sprintf("%s >= ?", fieldName), strValue[2:])
+				ds.db = ds.db.Where(fmt.Sprintf("%s >= ?", quotedFieldName), strValue[2:])
 			} else {
-				ds.db = ds.db.Where(fmt.Sprintf("%s > ?", fieldName), strValue[1:])
+				ds.db = ds.db.Where(fmt.Sprintf("%s > ?", quotedFieldName), strValue[1:])
 			}
 		} else if len(strValue) > 1 && strValue[0] == '<' {
 			if strValue[1] == '=' {
-				ds.db = ds.db.Where(fmt.Sprintf("%s <= ?", fieldName), strValue[2:])
+				ds.db = ds.db.Where(fmt.Sprintf("%s <= ?", quotedFieldName), strValue[2:])
 			} else {
-				ds.db = ds.db.Where(fmt.Sprintf("%s < ?", fieldName), strValue[1:])
+				ds.db = ds.db.Where(fmt.Sprintf("%s < ?", quotedFieldName), strValue[1:])
 			}
 		} else if len(strValue) > 1 && strValue[0] == '!' && strValue[1] == '=' {
-			ds.db = ds.db.Where(fmt.Sprintf("%s != ?", fieldName), strValue[2:])
+			ds.db = ds.db.Where(fmt.Sprintf("%s != ?", quotedFieldName), strValue[2:])
 		} else {
-			ds.db = ds.db.Where(fmt.Sprintf("%s = ?", fieldName), value)
+			ds.db = ds.db.Where(fmt.Sprintf("%s = ?", quotedFieldName), value)
 		}
 	} else {
-		ds.db = ds.db.Where(fmt.Sprintf("%s = ?", fieldName), value)
+		ds.db = ds.db.Where(fmt.Sprintf("%s = ?", quotedFieldName), value)
 	}
 	return ds
 }
@@ -312,13 +349,21 @@ func (ds *LinqDbSet[T]) WhereFieldNotNull(fieldName string) *LinqDbSet[T] {
 
 // OrderByField - EF Core: context.Users.OrderBy(x => x.Field)
 func (ds *LinqDbSet[T]) OrderByField(fieldName string) *LinqDbSet[T] {
-	ds.db = ds.db.Order(fieldName + " ASC")
+	quotedFieldName := fieldName
+	if ds.translator != nil {
+		quotedFieldName = ds.translator.GetQuotedFieldName(fieldName)
+	}
+	ds.db = ds.db.Order(quotedFieldName + " ASC")
 	return ds
 }
 
 // OrderByFieldDescending - EF Core: context.Users.OrderByDescending(x => x.Field)
 func (ds *LinqDbSet[T]) OrderByFieldDescending(fieldName string) *LinqDbSet[T] {
-	ds.db = ds.db.Order(fieldName + " DESC")
+	quotedFieldName := fieldName
+	if ds.translator != nil {
+		quotedFieldName = ds.translator.GetQuotedFieldName(fieldName)
+	}
+	ds.db = ds.db.Order(quotedFieldName + " DESC")
 	return ds
 }
 
@@ -433,4 +478,12 @@ func (ds *LinqDbSet[T]) HasChanges() bool {
 		}
 	}
 	return false
+}
+
+// Direct database operations (bypassing change tracking)
+
+
+// Delete deletes records matching the current query filters
+func (ds *LinqDbSet[T]) Delete() error {
+	return ds.db.Delete(new(T)).Error
 }

@@ -31,9 +31,18 @@ func NewEntityModel(entityType reflect.Type) *EntityModel {
 		entityType = entityType.Elem()
 	}
 
+	// Get table name (check for custom TableName method first)
+	tableName := entityType.Name() // Default to struct name
+	
+	// Create a zero value instance to check for TableName method
+	zeroValue := reflect.New(entityType).Interface()
+	if tabler, ok := zeroValue.(interface{ TableName() string }); ok {
+		tableName = tabler.TableName()
+	}
+
 	entity := &EntityModel{
 		Name:      entityType.Name(),
-		TableName: entityType.Name(), 
+		TableName: tableName, 
 		Type:      entityType,
 		Fields:    make(map[string]FieldModel),
 	}

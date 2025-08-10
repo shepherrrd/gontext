@@ -9,6 +9,7 @@ import (
 	"gorm.io/gorm"
 	"github.com/shepherrrd/gontext/internal/drivers"
 	"github.com/shepherrrd/gontext/internal/models"
+	"github.com/shepherrrd/gontext/internal/query"
 )
 
 type DbContext struct {
@@ -18,6 +19,7 @@ type DbContext struct {
 	dbSets        map[reflect.Type]interface{}
 	mu            sync.RWMutex
 	changeTracker *ChangeTracker
+	pgPlugin      *query.PostgreSQLPlugin
 }
 
 type DbContextOptions struct {
@@ -38,6 +40,12 @@ func NewDbContext(options DbContextOptions) (*DbContext, error) {
 		entities:      make(map[reflect.Type]*models.EntityModel),
 		dbSets:        make(map[reflect.Type]interface{}),
 		changeTracker: NewChangeTracker(),
+	}
+	
+	// Check if this is PostgreSQL - we'll get the plugin differently
+	if options.Driver.Name() == "postgres" {
+		// For now, we'll store a reference to check later
+		// The actual plugin registration happens in the driver
 	}
 
 	return ctx, nil

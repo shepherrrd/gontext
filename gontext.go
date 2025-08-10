@@ -48,7 +48,8 @@ type Tabler interface {
 func RegisterEntity[T any](ctx *DbContext) *LinqDbSet[T] {
 	var zero T
 	ctx.RegisterEntity(zero) // Register with the internal context
-	return NewLinqDbSet[T](ctx) // Return the LinqDbSet for EF Core-style operations
+	
+	return NewLinqDbSet[T](ctx) // Return the LinqDbSet with automatic PostgreSQL translation
 }
 
 func GetEntityType[T any]() reflect.Type {

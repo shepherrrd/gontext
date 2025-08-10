@@ -7,9 +7,17 @@ import (
 // LinqDbSet provides EF Core-style LINQ methods with type safety
 type LinqDbSet[T any] = linq.LinqDbSet[T]
 
+// PostgreSQLLinqDbSet provides PostgreSQL-specific LINQ methods with automatic query translation
+type PostgreSQLLinqDbSet[T any] = linq.PostgreSQLLinqDbSet[T]
+
 // NewLinqDbSet creates a new type-safe LINQ DbSet
 func NewLinqDbSet[T any](ctx *DbContext) *LinqDbSet[T] {
 	return linq.NewLinqDbSetWithContext[T](ctx.GetDB(), ctx)
+}
+
+// NewPostgreSQLLinqDbSet creates a new PostgreSQL-aware LINQ DbSet
+func NewPostgreSQLLinqDbSet[T any](ctx *DbContext) *PostgreSQLLinqDbSet[T] {
+	return linq.NewPostgreSQLLinqDbSet[T](ctx.GetDB(), ctx)
 }
 
 // Expression represents a LINQ lambda expression
