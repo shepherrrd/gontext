@@ -12,11 +12,17 @@ import (
 	"github.com/shepherrrd/gontext/internal/query"
 )
 
+// typeKey converts a reflect.Type to a string key for map storage
+func typeKey(t reflect.Type) string {
+	return t.PkgPath() + "." + t.Name()
+}
+
 type DbContext struct {
 	db            *gorm.DB
 	driver        drivers.DatabaseDriver
-	entities      map[reflect.Type]*models.EntityModel
-	dbSets        map[reflect.Type]interface{}
+	entities      map[string]*models.EntityModel  // Use string keys instead of reflect.Type
+	entityTypes   map[string]reflect.Type         // Map to store the actual reflect.Type for each key
+	dbSets        map[string]interface{}          // Use string keys instead of reflect.Type  
 	mu            sync.RWMutex
 	changeTracker *ChangeTracker
 	pgPlugin      *query.PostgreSQLPlugin
@@ -37,8 +43,9 @@ func NewDbContext(options DbContextOptions) (*DbContext, error) {
 	ctx := &DbContext{
 		db:            db,
 		driver:        options.Driver,
-		entities:      make(map[reflect.Type]*models.EntityModel),
-		dbSets:        make(map[reflect.Type]interface{}),
+		entities:      make(map[string]*models.EntityModel),
+		entityTypes:   make(map[string]reflect.Type),
+		dbSets:        make(map[string]interface{}),
 		changeTracker: NewChangeTracker(),
 	}
 	
@@ -57,18 +64,21 @@ func (ctx *DbContext) RegisterEntity(entity interface{}) *DbSet {
 		entityType = entityType.Elem()
 	}
 
+	key := typeKey(entityType)
+
 	ctx.mu.Lock()
 	defer ctx.mu.Unlock()
 
-	if _, exists := ctx.entities[entityType]; exists {
-		return ctx.dbSets[entityType].(*DbSet)
+	if _, exists := ctx.entities[key]; exists {
+		return ctx.dbSets[key].(*DbSet)
 	}
 
 	entityModel := models.NewEntityModel(entityType)
-	ctx.entities[entityType] = entityModel
+	ctx.entities[key] = entityModel
+	ctx.entityTypes[key] = entityType  // Store the reflect.Type for later retrieval
 
 	dbSet := NewDbSet(ctx, entityType, entityModel)
-	ctx.dbSets[entityType] = dbSet
+	ctx.dbSets[key] = dbSet
 
 	return dbSet
 }
@@ -77,7 +87,8 @@ func (ctx *DbContext) GetDbSet(entityType reflect.Type) *DbSet {
 	ctx.mu.RLock()
 	defer ctx.mu.RUnlock()
 
-	if dbSet, exists := ctx.dbSets[entityType]; exists {
+	key := typeKey(entityType)
+	if dbSet, exists := ctx.dbSets[key]; exists {
 		return dbSet.(*DbSet)
 	}
 
@@ -135,8 +146,10 @@ func (ctx *DbContext) GetEntityModels() map[reflect.Type]*models.EntityModel {
 	defer ctx.mu.RUnlock()
 
 	result := make(map[reflect.Type]*models.EntityModel)
-	for k, v := range ctx.entities {
-		result[k] = v
+	for key, entityModel := range ctx.entities {
+		if entityType, exists := ctx.entityTypes[key]; exists {
+			result[entityType] = entityModel
+		}
 	}
 	return result
 }

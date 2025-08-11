@@ -83,8 +83,8 @@ type IndexDefinition struct {
 }
 
 type ForeignKeyReference struct {
-	Table  string
-	Column string
-	OnDelete string
-	OnUpdate string
+	ReferencedTable  string
+	ReferencedColumn string
+	OnDelete         string
+	OnUpdate         string
 }

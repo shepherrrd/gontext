@@ -84,10 +84,49 @@ func NewLinqDbSetWithContext[T any](db *gorm.DB, ctx interface{}) *LinqDbSet[T] 
 	}
 }
 
-// Where - filters using lambda expression
-func (ds *LinqDbSet[T]) Where(predicate Expression[T]) *LinqDbSet[T] {
-	// For now, we'll use reflection and field analysis
-	// In a full implementation, you'd parse the function body
+// Where - overloaded method that supports multiple patterns:
+// 1. Where("Id = ?", value) - SQL with parameters
+// 2. Where("Id", value) - field name with value
+// 3. Where(&User{Id: 1}) - struct pointer like GORM
+func (ds *LinqDbSet[T]) Where(args ...interface{}) *LinqDbSet[T] {
+	if len(args) == 0 {
+		return ds
+	}
+	
+	// Pattern 1: Struct pointer like GORM Where(&User{Id: 1})
+	if len(args) == 1 {
+		arg := args[0]
+		// Check if it's a pointer to our entity type
+		if entityPtr, ok := arg.(*T); ok {
+			return ds.WhereEntity(*entityPtr)
+		}
+		// Check if it's the entity type directly
+		if entity, ok := arg.(T); ok {
+			return ds.WhereEntity(entity)
+		}
+		// Check if it's any pointer that we can dereference and cast
+		return ds.WhereStruct(arg)
+	}
+	
+	// Pattern 2: Where("Id", value) - field name with value
+	if len(args) == 2 {
+		if fieldName, ok := args[0].(string); ok {
+			return ds.WhereField(fieldName, args[1])
+		}
+	}
+	
+	// Pattern 3: Where("Id = ?", value) - SQL with parameters
+	if len(args) >= 2 {
+		if condition, ok := args[0].(string); ok {
+			quotedFieldName := condition
+			if ds.translator != nil {
+				quotedFieldName = ds.translator.TranslateQuery(ds.tableName, condition)
+			}
+			ds.db = ds.db.Where(quotedFieldName, args[1:]...)
+			return ds
+		}
+	}
+	
 	return ds
 }
 
@@ -114,14 +153,34 @@ func (ds *LinqDbSet[T]) FirstOrDefault(predicate ...Expression[T]) (*T, error) {
 	return &result, nil
 }
 
-// First - gets first element matching predicate
-func (ds *LinqDbSet[T]) First(predicate ...Expression[T]) (*T, error) {
+// First - overloaded method that supports multiple patterns:
+// 1. First() - get first element
+// 2. First(&Entity{Field: value}) - find by entity pattern (like GORM)
+func (ds *LinqDbSet[T]) First(args ...interface{}) (*T, error) {
 	query := ds.db.Model(new(T))
 	
-	if len(predicate) > 0 {
-		condition := ds.parseExpression(predicate[0])
-		if condition != "" {
-			query = query.Where(condition)
+	// If entity pattern provided, use it as WHERE condition
+	if len(args) == 1 {
+		if entityPtr, ok := args[0].(*T); ok {
+			// Use WhereEntity logic
+			entityValue := reflect.ValueOf(*entityPtr)
+			entityType := reflect.TypeOf(*entityPtr)
+			
+			for i := 0; i < entityType.NumField(); i++ {
+				field := entityType.Field(i)
+				fieldValue := entityValue.Field(i)
+				
+				if field.PkgPath != "" || fieldValue.IsZero() {
+					continue
+				}
+				
+				fieldName := field.Name
+				if ds.translator != nil {
+					fieldName = ds.translator.GetQuotedFieldName(fieldName)
+				}
+				
+				query = query.Where(fmt.Sprintf("%s = ?", fieldName), fieldValue.Interface())
+			}
 		}
 	}
 	
@@ -272,6 +331,66 @@ func (ds *LinqDbSet[T]) ById(id interface{}) (*T, error) {
 	return &result, nil
 }
 
+// WhereEntity - static typing with entity structs like GORM: context.Users.Where(&User{Id: 1, Name: "test"})
+func (ds *LinqDbSet[T]) WhereEntity(entity T) *LinqDbSet[T] {
+	entityValue := reflect.ValueOf(entity)
+	entityType := reflect.TypeOf(entity)
+	
+	// Handle pointer
+	if entityType.Kind() == reflect.Ptr {
+		if entityValue.IsNil() {
+			return ds
+		}
+		entityValue = entityValue.Elem()
+		entityType = entityType.Elem()
+	}
+	
+	// Iterate through fields and build WHERE conditions
+	for i := 0; i < entityType.NumField(); i++ {
+		field := entityType.Field(i)
+		fieldValue := entityValue.Field(i)
+		
+		// Skip unexported fields
+		if field.PkgPath != "" {
+			continue
+		}
+		
+		// Skip zero values (unset fields)
+		if fieldValue.IsZero() {
+			continue
+		}
+		
+		fieldName := field.Name
+		quotedFieldName := fieldName
+		if ds.translator != nil {
+			quotedFieldName = ds.translator.GetQuotedFieldName(fieldName)
+		}
+		
+		// Add WHERE condition for this field
+		ds.db = ds.db.Where(fmt.Sprintf("%s = ?", quotedFieldName), fieldValue.Interface())
+	}
+	
+	return ds
+}
+
+// Where - overloaded method that accepts either entity struct or function
+func (ds *LinqDbSet[T]) WhereStruct(entity interface{}) *LinqDbSet[T] {
+	// Type assertion to T
+	if typedEntity, ok := entity.(T); ok {
+		return ds.WhereEntity(typedEntity)
+	}
+	
+	// If it's a pointer, try to dereference and cast
+	entityValue := reflect.ValueOf(entity)
+	if entityValue.Kind() == reflect.Ptr && !entityValue.IsNil() {
+		if typedEntity, ok := entityValue.Elem().Interface().(T); ok {
+			return ds.WhereEntity(typedEntity)
+		}
+	}
+	
+	return ds
+}
+
 // WhereField - helper for field-based filtering - EF Core: context.Users.Where(x => x.Field == value)
 func (ds *LinqDbSet[T]) WhereField(fieldName string, value interface{}) *LinqDbSet[T] {
 	// Apply PostgreSQL translation if available
@@ -332,6 +451,68 @@ func (ds *LinqDbSet[T]) WhereFieldEndsWith(fieldName string, suffix string) *Lin
 // WhereFieldBetween - EF Core: context.Users.Where(x => x.Field >= min && x.Field <= max)
 func (ds *LinqDbSet[T]) WhereFieldBetween(fieldName string, min, max interface{}) *LinqDbSet[T] {
 	ds.db = ds.db.Where(fmt.Sprintf("%s BETWEEN ? AND ?", fieldName), min, max)
+	return ds
+}
+
+// Or - adds OR condition - EF Core: context.Users.Where(x => x.Email == email).Or(x => x.Username == username)
+func (ds *LinqDbSet[T]) Or(condition string, args ...interface{}) *LinqDbSet[T] {
+	quotedCondition := condition
+	if ds.translator != nil {
+		quotedCondition = ds.translator.TranslateQuery(ds.tableName, condition)
+	}
+	ds.db = ds.db.Or(quotedCondition, args...)
+	return ds
+}
+
+// OrField - adds OR condition for field comparison - EF Core: context.Users.Where(x => x.Email == email).Or(x => x.Username == username)  
+func (ds *LinqDbSet[T]) OrField(fieldName string, value interface{}) *LinqDbSet[T] {
+	quotedFieldName := fieldName
+	if ds.translator != nil {
+		quotedFieldName = ds.translator.GetQuotedFieldName(fieldName)
+	}
+	ds.db = ds.db.Or(fmt.Sprintf("%s = ?", quotedFieldName), value)
+	return ds
+}
+
+// OrEntity - adds OR condition with entity struct like GORM: Where(&User{Email: email}).Or(&User{Username: username})
+func (ds *LinqDbSet[T]) OrEntity(entity T) *LinqDbSet[T] {
+	entityValue := reflect.ValueOf(entity)
+	entityType := reflect.TypeOf(entity)
+	
+	// Handle pointer
+	if entityType.Kind() == reflect.Ptr {
+		if entityValue.IsNil() {
+			return ds
+		}
+		entityValue = entityValue.Elem()
+		entityType = entityType.Elem()
+	}
+	
+	// Build OR conditions for non-zero fields
+	for i := 0; i < entityType.NumField(); i++ {
+		field := entityType.Field(i)
+		fieldValue := entityValue.Field(i)
+		
+		// Skip unexported fields
+		if field.PkgPath != "" {
+			continue
+		}
+		
+		// Skip zero values (unset fields)
+		if fieldValue.IsZero() {
+			continue
+		}
+		
+		fieldName := field.Name
+		quotedFieldName := fieldName
+		if ds.translator != nil {
+			quotedFieldName = ds.translator.GetQuotedFieldName(fieldName)
+		}
+		
+		// Add OR condition for this field
+		ds.db = ds.db.Or(fmt.Sprintf("%s = ?", quotedFieldName), fieldValue.Interface())
+	}
+	
 	return ds
 }
 
@@ -404,9 +585,10 @@ func (ds *LinqDbSet[T]) AddRange(entities []T) {
 	}
 }
 
-// Update - EF Core: context.Users.Update(user)
-func (ds *LinqDbSet[T]) Update(entity T) {
+// Update - EF Core: context.Users.Update(user) with GORM-style support
+func (ds *LinqDbSet[T]) Update(entity T) error {
 	if ds.context != nil {
+		// Use change tracking when available
 		ctxValue := reflect.ValueOf(ds.context)
 		if ctxValue.Kind() == reflect.Ptr {
 			updateEntityMethod := ctxValue.MethodByName("UpdateEntity")
@@ -414,9 +596,18 @@ func (ds *LinqDbSet[T]) Update(entity T) {
 				updateEntityMethod.Call([]reflect.Value{
 					reflect.ValueOf(entity),
 				})
+				saveChangesMethod := ctxValue.MethodByName("SaveChanges")
+				if saveChangesMethod.IsValid() {
+					results := saveChangesMethod.Call([]reflect.Value{})
+					if len(results) > 0 && !results[0].IsNil() {
+						return results[0].Interface().(error)
+					}
+					return nil
+				}
 			}
 		}
 	}
+	return ds.db.Save(&entity).Error
 }
 
 // UpdateRange - EF Core: context.Users.UpdateRange(users)
@@ -480,7 +671,31 @@ func (ds *LinqDbSet[T]) HasChanges() bool {
 	return false
 }
 
-// Direct database operations (bypassing change tracking)
+// GORM-style database operations with change tracking
+
+// Save - GORM-style save that creates or updates
+func (ds *LinqDbSet[T]) Save(entity interface{}) error {
+	if ds.context != nil {
+		// Use change tracking when available
+		ctxValue := reflect.ValueOf(ds.context)
+		if ctxValue.Kind() == reflect.Ptr {
+			saveChangesMethod := ctxValue.MethodByName("SaveChanges")
+			if saveChangesMethod.IsValid() {
+				results := saveChangesMethod.Call([]reflect.Value{})
+				if len(results) > 0 && !results[0].IsNil() {
+					return results[0].Interface().(error)
+				}
+				return nil
+			}
+		}
+	}
+	return ds.db.Save(entity).Error
+}
+
+// Create - GORM-style create 
+func (ds *LinqDbSet[T]) Create(entity interface{}) error {
+	return ds.db.Create(entity).Error
+}
 
 
 // Delete deletes records matching the current query filters

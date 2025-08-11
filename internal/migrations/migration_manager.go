@@ -341,6 +341,8 @@ func (mm *MigrationManager) generateOperations() ([]models.MigrationOperation, e
 
 func (mm *MigrationManager) createTableOperation(entity *models.EntityModel, driver drivers.DatabaseDriver) models.MigrationOperation {
 	var columns []models.ColumnDefinition
+	var indexes []models.IndexDefinition
+	entityModels := mm.context.GetEntityModels() // Get entity models for foreign key resolution
 
 	for _, field := range entity.Fields {
 		column := models.ColumnDefinition{
@@ -351,6 +353,41 @@ func (mm *MigrationManager) createTableOperation(entity *models.EntityModel, dri
 			IsUnique:     field.IsUnique,
 			DefaultValue: field.DefaultValue,
 		}
+
+		// Parse GORM tags for additional constraints
+		if len(field.Tags) > 0 {
+			// Parse foreign key relationships from tags
+			if foreignKey := mm.parseForeignKeyFromTags(field.Tags, entity.Name); foreignKey != nil {
+				column.References = foreignKey
+			}
+
+			// Parse unique indexes
+			if _, hasUniqueIndex := field.Tags["uniqueIndex"]; hasUniqueIndex {
+				column.IsUnique = true
+				indexes = append(indexes, models.IndexDefinition{
+					Name:     fmt.Sprintf("idx_%s_%s", entity.TableName, field.ColumnName),
+					Columns:  []string{field.ColumnName},
+					IsUnique: true,
+				})
+			}
+
+			// Parse regular indexes  
+			if _, hasIndex := field.Tags["index"]; hasIndex {
+				indexes = append(indexes, models.IndexDefinition{
+					Name:     fmt.Sprintf("idx_%s_%s", entity.TableName, field.ColumnName),
+					Columns:  []string{field.ColumnName},
+					IsUnique: false,
+				})
+			}
+		}
+
+		// Also check field names for common foreign key patterns (only for UUID fields)
+		if column.References == nil && strings.Contains(field.Type, "uuid.UUID") {
+			if foreignKey := mm.parseForeignKeyFromFieldName(field.ColumnName, entityModels); foreignKey != nil {
+				column.References = foreignKey
+			}
+		}
+
 		columns = append(columns, column)
 	}
 
@@ -360,6 +397,7 @@ func (mm *MigrationManager) createTableOperation(entity *models.EntityModel, dri
 		Details: models.CreateTableOperation{
 			TableName: entity.TableName,
 			Columns:   columns,
+			Indexes:   indexes,
 		},
 	}
 }
@@ -542,6 +580,8 @@ func (mm *MigrationManager) generateCreateTableSQL(createOp models.CreateTableOp
 	
 	var columns []string
 	var primaryKeys []string
+	var foreignKeys []string
+	var uniqueConstraints []string
 	
 	for _, col := range createOp.Columns {
 		columnDef := fmt.Sprintf("\"%s\" %s", col.Name, col.Type)
@@ -549,7 +589,10 @@ func (mm *MigrationManager) generateCreateTableSQL(createOp models.CreateTableOp
 			columnDef += " NOT NULL"
 		}
 		if col.IsUnique && !col.IsPrimary {
-			columnDef += " UNIQUE"
+			// Use named unique constraints for better error messages
+			uniqueConstraintName := fmt.Sprintf("uni_%s_%s", createOp.TableName, col.Name)
+			uniqueConstraints = append(uniqueConstraints, 
+				fmt.Sprintf("CONSTRAINT \"%s\" UNIQUE (\"%s\")", uniqueConstraintName, col.Name))
 		}
 		if col.DefaultValue != nil {
 			columnDef += fmt.Sprintf(" DEFAULT %s", *col.DefaultValue)
@@ -559,12 +602,32 @@ func (mm *MigrationManager) generateCreateTableSQL(createOp models.CreateTableOp
 		if col.IsPrimary {
 			primaryKeys = append(primaryKeys, fmt.Sprintf("\"%s\"", col.Name))
 		}
+		
+		// Add foreign key constraints
+		if col.References != nil {
+			fkConstraintName := fmt.Sprintf("fk_%s_%s", createOp.TableName, col.Name)
+			foreignKeys = append(foreignKeys, 
+				fmt.Sprintf("CONSTRAINT \"%s\" FOREIGN KEY (\"%s\") REFERENCES \"%s\" (\"%s\")", 
+					fkConstraintName, col.Name, col.References.ReferencedTable, col.References.ReferencedColumn))
+		}
 	}
 	
 	sql.WriteString(strings.Join(columns, ", "))
 	
 	if len(primaryKeys) > 0 {
 		sql.WriteString(fmt.Sprintf(", PRIMARY KEY (%s)", strings.Join(primaryKeys, ", ")))
+	}
+	
+	// Add unique constraints
+	for _, uniqueConstraint := range uniqueConstraints {
+		sql.WriteString(", ")
+		sql.WriteString(uniqueConstraint)
+	}
+	
+	// Add foreign key constraints
+	for _, foreignKey := range foreignKeys {
+		sql.WriteString(", ")
+		sql.WriteString(foreignKey)
 	}
 	
 	sql.WriteString(")")
@@ -953,7 +1016,10 @@ func (mm *MigrationManager) generateInitialOperations() ([]models.MigrationOpera
 	entityModels := mm.context.GetEntityModels()
 	driver := mm.context.GetDriver()
 
-	for _, entityModel := range entityModels {
+	// Sort entities by dependencies (parent tables first)
+	sortedEntities := mm.sortEntitiesByDependencies(entityModels)
+
+	for _, entityModel := range sortedEntities {
 		operation := mm.createTableOperation(entityModel, driver)
 		operations = append(operations, operation)
 	}
@@ -961,15 +1027,127 @@ func (mm *MigrationManager) generateInitialOperations() ([]models.MigrationOpera
 	return operations, nil
 }
 
+// sortEntitiesByDependencies sorts entities so parent tables are created before child tables
+// Uses dynamic topological sorting based on foreign key relationships detected from GORM tags
+func (mm *MigrationManager) sortEntitiesByDependencies(entityModels map[reflect.Type]*models.EntityModel) []*models.EntityModel {
+	// Build dependency graph from foreign key relationships
+	dependencies := make(map[string][]string) // entity -> list of entities it depends on
+	allEntities := make(map[string]*models.EntityModel)
+	
+	// Initialize maps
+	for _, entity := range entityModels {
+		allEntities[entity.Name] = entity
+		dependencies[entity.Name] = []string{}
+	}
+	
+	// Analyze each entity for foreign key dependencies
+	for _, entity := range entityModels {
+		for _, field := range entity.Fields {
+			// Check if field has foreign key relationship via GORM tags
+			if gormTag, exists := field.Tags["gorm"]; exists {
+				if strings.Contains(gormTag, "foreignKey:") {
+					// Parse foreignKey tag to find referenced entity
+					parts := strings.Split(gormTag, ";")
+					for _, part := range parts {
+						part = strings.TrimSpace(part)
+						if strings.HasPrefix(part, "references:") {
+							// This indicates a relationship - find the referenced entity
+							// The field type should indicate the referenced entity
+							fieldType := strings.TrimPrefix(field.Type, "[]") // Handle slices
+							fieldType = strings.TrimPrefix(fieldType, "*")    // Handle pointers
+							
+							// Check if this type corresponds to another entity
+							for _, otherEntity := range entityModels {
+								if otherEntity.Name == fieldType {
+									dependencies[entity.Name] = append(dependencies[entity.Name], fieldType)
+								}
+							}
+						}
+					}
+				}
+			}
+			
+			// Also check for UUID fields that follow naming conventions (e.g., UserId, BucketId)
+			if strings.Contains(field.Type, "uuid.UUID") && strings.HasSuffix(field.Name, "Id") {
+				// Extract potential entity name (e.g., UserId -> User, BucketId -> Bucket)
+				potentialEntityName := strings.TrimSuffix(field.Name, "Id")
+				if referencedEntity, exists := allEntities[potentialEntityName]; exists && referencedEntity.Name != entity.Name {
+					// Avoid duplicates
+					found := false
+					for _, dep := range dependencies[entity.Name] {
+						if dep == potentialEntityName {
+							found = true
+							break
+						}
+					}
+					if !found {
+						dependencies[entity.Name] = append(dependencies[entity.Name], potentialEntityName)
+					}
+				}
+			}
+		}
+	}
+	
+	// Perform topological sort
+	result := []*models.EntityModel{}
+	visited := make(map[string]bool)
+	visiting := make(map[string]bool)
+	
+	var visit func(string) error
+	visit = func(entityName string) error {
+		if visiting[entityName] {
+			return fmt.Errorf("circular dependency detected involving entity: %s", entityName)
+		}
+		if visited[entityName] {
+			return nil
+		}
+		
+		visiting[entityName] = true
+		
+		// Visit all dependencies first
+		for _, dep := range dependencies[entityName] {
+			if _, exists := allEntities[dep]; exists {
+				if err := visit(dep); err != nil {
+					return err
+				}
+			}
+		}
+		
+		visiting[entityName] = false
+		visited[entityName] = true
+		result = append(result, allEntities[entityName])
+		
+		return nil
+	}
+	
+	// Visit all entities
+	for entityName := range allEntities {
+		if !visited[entityName] {
+			if err := visit(entityName); err != nil {
+				// If topological sort fails due to cycles, fall back to simple ordering
+				fmt.Printf("Warning: %v. Using simple entity ordering.\n", err)
+				result = []*models.EntityModel{}
+				for _, entity := range entityModels {
+					result = append(result, entity)
+				}
+				break
+			}
+		}
+	}
+	
+	return result
+}
+
 func (mm *MigrationManager) generateOperationsFromComparison(comparison *models.SnapshotComparison) ([]models.MigrationOperation, error) {
 	var operations []models.MigrationOperation
 	driver := mm.context.GetDriver()
+	entityModels := mm.context.GetEntityModels()
 
 	for _, change := range comparison.Changes {
 		switch change.Type {
 		case models.EntityAdded:
 			entitySnapshot := change.Details.(models.EntitySnapshot)
-			operation := mm.createTableOperationFromSnapshot(entitySnapshot, driver)
+			operation := mm.createTableOperationFromSnapshot(entitySnapshot, driver, entityModels)
 			operations = append(operations, operation)
 
 		case models.FieldAdded:
@@ -1021,7 +1199,7 @@ func (mm *MigrationManager) generateOperationsFromComparison(comparison *models.
 	return operations, nil
 }
 
-func (mm *MigrationManager) createTableOperationFromSnapshot(entitySnapshot models.EntitySnapshot, driver drivers.DatabaseDriver) models.MigrationOperation {
+func (mm *MigrationManager) createTableOperationFromSnapshot(entitySnapshot models.EntitySnapshot, driver drivers.DatabaseDriver, entityModels map[reflect.Type]*models.EntityModel) models.MigrationOperation {
 	var columns []models.ColumnDefinition
 
 	for _, field := range entitySnapshot.Fields {
@@ -1055,4 +1233,110 @@ func toSnakeCase(str string) string {
 		result.WriteRune(r)
 	}
 	return strings.ToLower(result.String())
+}
+
+// parseForeignKeyFromTags extracts foreign key information from GORM tags
+func (mm *MigrationManager) parseForeignKeyFromTags(tags map[string]string, entityName string) *models.ForeignKeyReference {
+	// Look for navigation properties in related entities that reference this field
+	// This is a simplified approach - in practice we'd need to analyze all entities to find relationships
+	
+	entityModels := mm.context.GetEntityModels()
+	for _, relatedEntity := range entityModels {
+		for _, field := range relatedEntity.Fields {
+			if len(field.Tags) > 0 {
+				// Check if this field has a foreignKey tag pointing to our entity
+				if foreignKeyValue, hasForeignKey := field.Tags["foreignKey"]; hasForeignKey {
+					if foreignKeyValue != "" {
+						// Check if this foreign key refers to a field in our current entity
+						for _, ourEntity := range entityModels {
+							if ourEntity.Name == entityName {
+								for _, ourField := range ourEntity.Fields {
+									if ourField.ColumnName == foreignKeyValue {
+										return &models.ForeignKeyReference{
+											ReferencedTable:  relatedEntity.TableName,
+											ReferencedColumn: "Id", // Most foreign keys reference the Id field
+											OnDelete:         "CASCADE",
+											OnUpdate:         "CASCADE",
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	
+	return nil
+}
+
+// parseForeignKeyFromFieldName checks field names for common foreign key patterns dynamically
+func (mm *MigrationManager) parseForeignKeyFromFieldName(fieldName string, entityModels map[reflect.Type]*models.EntityModel) *models.ForeignKeyReference {
+	fieldNameLower := strings.ToLower(fieldName)
+	
+	// Only create foreign keys for UUID fields that match specific patterns
+	// Skip primary key field and non-ID fields
+	if fieldNameLower == "id" || !strings.Contains(fieldNameLower, "id") {
+		return nil
+	}
+	
+	// Build map of available entities for reference lookup
+	allEntities := make(map[string]*models.EntityModel)
+	for _, entity := range entityModels {
+		allEntities[strings.ToLower(entity.Name)] = entity
+	}
+	
+	// Dynamic pattern matching: <EntityName>Id -> <EntityName>.Id
+	// Be more specific about what constitutes a valid foreign key field
+	if strings.HasSuffix(fieldNameLower, "id") && len(fieldNameLower) > 2 {
+		// Extract potential entity name (e.g., "userid" -> "user", "bucketid" -> "bucket")
+		potentialEntityName := fieldNameLower[:len(fieldNameLower)-2] // Remove "id" suffix
+		
+		// Only create foreign key if:
+		// 1. The potential entity name matches an existing entity
+		// 2. The field name follows proper naming convention (entity name + Id)
+		if referencedEntity, exists := allEntities[potentialEntityName]; exists {
+			// Additional validation: the field name should be a reasonable match
+			expectedFieldName := referencedEntity.Name + "Id"
+			if strings.EqualFold(fieldName, expectedFieldName) {
+				return &models.ForeignKeyReference{
+					ReferencedTable:  referencedEntity.Name, 
+					ReferencedColumn: "Id",
+					OnDelete:         "CASCADE",
+					OnUpdate:         "CASCADE",
+				}
+			}
+		}
+	}
+	
+	// Handle special cases for common field patterns that typically reference user-like entities
+	// Try to find the most likely entity that represents users/accounts
+	var userLikeEntity *models.EntityModel
+	possibleUserNames := []string{"user", "account", "person", "member", "customer", "client"}
+	
+	for _, possibleName := range possibleUserNames {
+		if entity, exists := allEntities[possibleName]; exists {
+			userLikeEntity = entity
+			break
+		}
+	}
+	
+	// Only apply special cases if we found a user-like entity
+	if userLikeEntity != nil {
+		specialCases := []string{"uploadedby", "createdby", "modifiedby", "ownerid", "assignedto"}
+		
+		for _, specialCase := range specialCases {
+			if fieldNameLower == specialCase {
+				return &models.ForeignKeyReference{
+					ReferencedTable:  userLikeEntity.Name,
+					ReferencedColumn: "Id",
+					OnDelete:         "CASCADE", 
+					OnUpdate:         "CASCADE",
+				}
+			}
+		}
+	}
+	
+	return nil
 }

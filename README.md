@@ -187,6 +187,105 @@ product, _ := productSet.WhereField("Name", "laptop").FirstOrDefault()
 - **Multi-tenant**: Different table prefixes per tenant
 - **Database conventions**: Snake_case, plural names, etc.
 
+## 🎯 GORM-Style Static Typing
+
+**GoNtext now supports GORM-style static typing with struct patterns!** Use familiar GORM syntax alongside EF Core-style LINQ methods.
+
+### ✨ Features
+
+- **🔍 Struct-based Where Clauses**: Use `&User{Email: "test@example.com"}` instead of strings
+- **🚀 Multiple Query Patterns**: Support for SQL, field names, and struct patterns
+- **🔗 OR Operations**: Chain WHERE and OR conditions with struct patterns
+- **⚡ GORM-Compatible**: Drop-in replacement for common GORM operations
+- **🎯 Type-Safe**: Compile-time checking with struct patterns
+
+### 📝 Query Patterns
+
+**GoNtext supports 3 query patterns:**
+
+```go
+// Pattern 1: SQL with parameters (traditional)
+user, _ := ctx.Users.Where("Email = ?", "test@example.com").FirstOrDefault()
+
+// Pattern 2: Field name with value (EF Core style)  
+user, _ := ctx.Users.Where("Email", "test@example.com").FirstOrDefault()
+
+// Pattern 3: Struct pattern (GORM style) ✨ NEW!
+user, _ := ctx.Users.Where(&entities.User{Email: "test@example.com"}).FirstOrDefault()
+```
+
+### 🔗 OR Operations
+
+**Use OR conditions with struct patterns for complex queries:**
+
+```go
+// Login with email OR username (like GORM)
+user, _ := ctx.Users.Where(&entities.User{Email: "john@example.com"}).
+                    OrField("Username", "john").
+                    FirstOrDefault()
+
+// Multiple OR conditions with structs
+users, _ := ctx.Users.Where(&entities.User{Role: "admin"}).
+                      OrEntity(entities.User{Role: "manager"}).
+                      ToList()
+
+// Mixed patterns
+user, _ := ctx.Users.Where("IsActive", true).
+                     OrField("Role", "admin").
+                     FirstOrDefault()
+```
+
+### 🚀 GORM-Style CRUD Operations
+
+**Use familiar GORM patterns with GoNtext's change tracking:**
+
+```go
+// Create (GORM style)
+user := &entities.User{Username: "john", Email: "john@example.com"}
+err := ctx.Users.Create(user)
+
+// Save (creates or updates like GORM)
+user.Email = "newemail@example.com"
+err := ctx.Users.Save(user)
+
+// First with struct pattern (like GORM)
+user, err := ctx.Users.First(&entities.User{Email: "test@example.com"})
+
+// Update with struct pattern
+user.Username = "newusername"
+err := ctx.Users.Update(*user)
+
+// Find by ID (GORM style)
+user, err := ctx.Users.Find(userID)
+```
+
+### 🎯 Login Example
+
+**Perfect for authentication with email OR username:**
+
+```go
+func LoginUser(emailOrUsername, password string) (*User, error) {
+    // Search by email OR username using static typing
+    user, err := ctx.Users.WhereField("email", emailOrUsername).
+                           OrField("username", emailOrUsername).
+                           FirstOrDefault()
+    
+    if err != nil || user == nil {
+        return nil, fmt.Errorf("invalid credentials")
+    }
+    
+    // Verify password...
+    return user, nil
+}
+```
+
+### ⚡ Performance & Compatibility
+
+- **Zero Runtime Overhead**: Struct patterns compile to optimized SQL
+- **PostgreSQL Optimized**: Automatic field name translation with quoted identifiers
+- **GORM Compatible**: Familiar methods work the same way
+- **Change Tracking**: Automatic entity state management like EF Core
+
 ## 📚 Examples
 
 Choose what you want to learn:
@@ -259,20 +358,44 @@ func handleMigrations() {
 
 GoNtext brings the best of Entity Framework Core to Go!
 
-## 🤝 EF Core Comparison
+## 🤝 Framework Comparison
+
+### EF Core vs GoNtext
 
 | EF Core (C#) | GoNtext (Go) |
 |--------------|--------------|
 | `context.Users.Add(user)` | `ctx.Users.Add(user); ctx.SaveChanges()` |
 | `context.SaveChanges()` | `ctx.SaveChanges()` |
 | `context.Users.Where(x => x.IsActive).ToList()` | `ctx.Users.WhereField("IsActive", true).ToList()` |
+| `context.Users.Where(x => x.IsActive).ToList()` | `ctx.Users.Where(&User{IsActive: true}).ToList()` ✨ |
 | `context.Users.FirstOrDefault(x => x.Id == id)` | `ctx.Users.ById(id)` |
+| `context.Users.FirstOrDefault(x => x.Id == id)` | `ctx.Users.First(&User{Id: id})` ✨ |
 | `context.Users.OrderBy(x => x.Email)` | `ctx.Users.OrderByField("Email")` |
 | Pascal case tables (`Users`) | Pascal case tables (`"User"`) ✨ |
 | Pascal case columns (`IsActive`) | Pascal case columns (`"IsActive"`) ✨ |
 | `[Table("app_users")] class User` | `func (User) TableName() string { return "app_users" }` ✨ |
-| `Add-Migration InitialCreate` | Custom migration commands |
-| `Update-Database` | Custom migration commands |
+
+### GORM vs GoNtext
+
+| GORM (Go) | GoNtext (Go) |
+|-----------|--------------|
+| `db.Where(&User{Email: "test"}).First(&user)` | `ctx.Users.Where(&User{Email: "test"}).FirstOrDefault()` ✨ |
+| `db.Where("email = ?", email).Or("username = ?", username).First(&user)` | `ctx.Users.Where("Email", email).OrField("Username", username).FirstOrDefault()` ✨ |
+| `db.Create(&user)` | `ctx.Users.Create(&user)` ✨ |
+| `db.Save(&user)` | `ctx.Users.Save(&user)` ✨ |
+| `db.First(&user, id)` | `ctx.Users.Find(id)` ✨ |
+| Manual change tracking | Automatic change tracking ✨ |
+| Manual migrations | Code-first migrations ✨ |
+| Snake_case by default | Pascal case with PostgreSQL ✨ |
+
+### 🎯 Best of Both Worlds
+
+**GoNtext combines the best features:**
+
+- **🎯 EF Core**: Change tracking, DbContext patterns, LINQ-style queries
+- **⚡ GORM**: Familiar syntax, struct-based queries, flexible operations
+- **🐘 PostgreSQL**: Automatic Pascal case with quoted identifiers
+- **🚀 Performance**: Zero runtime overhead, optimized SQL generation
 
 ## 📖 Documentation
 
