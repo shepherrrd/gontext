@@ -133,6 +133,11 @@ func (ctx *DbContext) BeginTransaction() *gorm.DB {
 	return ctx.db.Begin()
 }
 
+// GetDB returns the underlying GORM database instance
+// DEPRECATED: Use LINQ methods instead of GetDB().Model() patterns
+// OLD DEPRECATED PATTERN: ctx.GetDB().Model(&Entity{}).Select("SUM(field)").Scan(&result)
+// NEW CORRECT PATTERN: result, err := ctx.EntitySet.SumField("field")
+// Only use GetDB() for operations not yet supported by LINQ methods
 func (ctx *DbContext) GetDB() *gorm.DB {
 	return ctx.db
 }
@@ -141,15 +146,13 @@ func (ctx *DbContext) GetDriver() drivers.DatabaseDriver {
 	return ctx.driver
 }
 
-func (ctx *DbContext) GetEntityModels() map[reflect.Type]*models.EntityModel {
+func (ctx *DbContext) GetEntityModels() map[string]*models.EntityModel {
 	ctx.mu.RLock()
 	defer ctx.mu.RUnlock()
 
-	result := make(map[reflect.Type]*models.EntityModel)
+	result := make(map[string]*models.EntityModel)
 	for key, entityModel := range ctx.entities {
-		if entityType, exists := ctx.entityTypes[key]; exists {
-			result[entityType] = entityModel
-		}
+		result[key] = entityModel
 	}
 	return result
 }

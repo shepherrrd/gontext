@@ -1,6 +1,7 @@
 package linq
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 
@@ -383,4 +384,98 @@ func (ds *PostgreSQLLinqDbSet[T]) OrEntity(entity T) *PostgreSQLLinqDbSet[T] {
 	}
 	
 	return ds
+}
+
+// Include - Type-safe Include with field name validation: context.Users.Include("Buckets", "Sessions")
+func (ds *PostgreSQLLinqDbSet[T]) Include(fieldNames ...string) *PostgreSQLLinqDbSet[T] {
+	newLinqDbSet := ds.LinqDbSet.Include(fieldNames...)
+	
+	return &PostgreSQLLinqDbSet[T]{
+		LinqDbSet:  newLinqDbSet,
+		translator: ds.translator,
+		tableName:  ds.tableName,
+	}
+}
+
+// IncludeAll - Load all relationships automatically
+func (ds *PostgreSQLLinqDbSet[T]) IncludeAll() *PostgreSQLLinqDbSet[T] {
+	newLinqDbSet := ds.LinqDbSet.IncludeAll()
+	
+	return &PostgreSQLLinqDbSet[T]{
+		LinqDbSet:  newLinqDbSet,
+		translator: ds.translator,
+		tableName:  ds.tableName,
+	}
+}
+
+
+// Omit - Exclude specific fields from loading: context.Users.Omit("PasswordHash")
+func (ds *PostgreSQLLinqDbSet[T]) Omit(fields ...string) *PostgreSQLLinqDbSet[T] {
+	newLinqDbSet := ds.LinqDbSet.Omit(fields...)
+	
+	return &PostgreSQLLinqDbSet[T]{
+		LinqDbSet:  newLinqDbSet,
+		translator: ds.translator,
+		tableName:  ds.tableName,
+	}
+}
+
+// Scan - Execute query and scan results into destination with PostgreSQL field translation
+// Example: var total int64; err := ctx.Files.Select("COALESCE(SUM(\"Size\"), 0)").Scan(&total)
+func (ds *PostgreSQLLinqDbSet[T]) Scan(dest interface{}) error {
+	return ds.LinqDbSet.db.Scan(dest).Error
+}
+
+// SumField - Calculate sum using field name with PostgreSQL translation: ctx.Files.SumField("Size")
+func (ds *PostgreSQLLinqDbSet[T]) SumField(fieldName string) (float64, error) {
+	var result float64
+	quotedFieldName := ds.translator.GetQuotedFieldName(fieldName)
+	
+	err := ds.LinqDbSet.db.Model(new(T)).Select(fmt.Sprintf("COALESCE(SUM(%s), 0)", quotedFieldName)).Scan(&result).Error
+	return result, err
+}
+
+// AverageField - Calculate average using field name with PostgreSQL translation: ctx.Files.AverageField("Size")
+func (ds *PostgreSQLLinqDbSet[T]) AverageField(fieldName string) (float64, error) {
+	var result float64
+	quotedFieldName := ds.translator.GetQuotedFieldName(fieldName)
+	
+	err := ds.LinqDbSet.db.Model(new(T)).Select(fmt.Sprintf("COALESCE(AVG(%s), 0)", quotedFieldName)).Scan(&result).Error
+	return result, err
+}
+
+// MinField - Find minimum value using field name with PostgreSQL translation: ctx.Files.MinField("Size")
+func (ds *PostgreSQLLinqDbSet[T]) MinField(fieldName string) (interface{}, error) {
+	var result interface{}
+	quotedFieldName := ds.translator.GetQuotedFieldName(fieldName)
+	
+	err := ds.LinqDbSet.db.Model(new(T)).Select(fmt.Sprintf("MIN(%s)", quotedFieldName)).Scan(&result).Error
+	return result, err
+}
+
+// MaxField - Find maximum value using field name with PostgreSQL translation: ctx.Files.MaxField("Size")
+func (ds *PostgreSQLLinqDbSet[T]) MaxField(fieldName string) (interface{}, error) {
+	var result interface{}
+	quotedFieldName := ds.translator.GetQuotedFieldName(fieldName)
+	
+	err := ds.LinqDbSet.db.Model(new(T)).Select(fmt.Sprintf("MAX(%s)", quotedFieldName)).Scan(&result).Error
+	return result, err
+}
+
+// CountField - Count non-null values in a field: ctx.Files.CountField("Size")
+func (ds *PostgreSQLLinqDbSet[T]) CountField(fieldName string) (int64, error) {
+	var result int64
+	quotedFieldName := ds.translator.GetQuotedFieldName(fieldName)
+	
+	err := ds.LinqDbSet.db.Model(new(T)).Select(fmt.Sprintf("COUNT(%s)", quotedFieldName)).Scan(&result).Error
+	return result, err
+}
+
+// CountDistinctField - Count distinct values in a field: ctx.Files.CountDistinctField("UserId")
+func (ds *PostgreSQLLinqDbSet[T]) CountDistinctField(fieldName string) (int64, error) {
+	var result int64
+	quotedFieldName := ds.translator.GetQuotedFieldName(fieldName)
+	
+	err := ds.LinqDbSet.db.Model(new(T)).Select(fmt.Sprintf("COUNT(DISTINCT %s)", quotedFieldName)).Scan(&result).Error
+	return result, err
 }

@@ -3,7 +3,6 @@ package linq
 import (
 	"fmt"
 	"reflect"
-
 	"gorm.io/gorm"
 	"github.com/shepherrrd/gontext/internal/query"
 )
@@ -131,6 +130,9 @@ func (ds *LinqDbSet[T]) Where(args ...interface{}) *LinqDbSet[T] {
 }
 
 // FirstOrDefault - gets first element matching predicate or zero value
+// IMPORTANT: Returns (*T, error) - you MUST handle both return values in your code
+// DEPRECATED OLD PATTERN: user := h.dbContext.Files.FirstOrDefault() - WRONG! Missing error handling
+// CORRECT NEW PATTERN: user, err := h.dbContext.Files.FirstOrDefault(); if err != nil { ... }
 func (ds *LinqDbSet[T]) FirstOrDefault(predicate ...Expression[T]) (*T, error) {
 	query := ds.db.Model(new(T))
 	
@@ -701,4 +703,238 @@ func (ds *LinqDbSet[T]) Create(entity interface{}) error {
 // Delete deletes records matching the current query filters
 func (ds *LinqDbSet[T]) Delete() error {
 	return ds.db.Delete(new(T)).Error
+}
+
+// Scan - Execute query and scan results into destination
+// Example: var total int64; err := ctx.Files.Select("COALESCE(SUM(size), 0)").Scan(&total)
+func (ds *LinqDbSet[T]) Scan(dest interface{}) error {
+	return ds.db.Scan(dest).Error
+}
+
+// Sum - Calculate sum of a numeric field: ctx.Files.Sum(func(f entities.File) interface{} { return f.Size })
+// For static typing: ctx.Files.SumField("Size") or ctx.Files.Sum(&entities.File.Size) when supported
+func (ds *LinqDbSet[T]) Sum(selector func(T) interface{}) (float64, error) {
+	fieldName := ds.parseFieldSelector(selector)
+	if fieldName == "" {
+		return 0, fmt.Errorf("unable to parse field selector for Sum")
+	}
+	
+	var result float64
+	quotedFieldName := fieldName
+	if ds.translator != nil {
+		quotedFieldName = ds.translator.GetQuotedFieldName(fieldName)
+	}
+	
+	err := ds.db.Model(new(T)).Select(fmt.Sprintf("COALESCE(SUM(%s), 0)", quotedFieldName)).Scan(&result).Error
+	return result, err
+}
+
+// SumField - Calculate sum using field name: ctx.Files.SumField("Size")
+func (ds *LinqDbSet[T]) SumField(fieldName string) (float64, error) {
+	var result float64
+	quotedFieldName := fieldName
+	if ds.translator != nil {
+		quotedFieldName = ds.translator.GetQuotedFieldName(fieldName)
+	}
+	
+	err := ds.db.Model(new(T)).Select(fmt.Sprintf("COALESCE(SUM(%s), 0)", quotedFieldName)).Scan(&result).Error
+	return result, err
+}
+
+// Average - Calculate average of a numeric field
+func (ds *LinqDbSet[T]) Average(selector func(T) interface{}) (float64, error) {
+	fieldName := ds.parseFieldSelector(selector)
+	if fieldName == "" {
+		return 0, fmt.Errorf("unable to parse field selector for Average")
+	}
+	
+	var result float64
+	quotedFieldName := fieldName
+	if ds.translator != nil {
+		quotedFieldName = ds.translator.GetQuotedFieldName(fieldName)
+	}
+	
+	err := ds.db.Model(new(T)).Select(fmt.Sprintf("COALESCE(AVG(%s), 0)", quotedFieldName)).Scan(&result).Error
+	return result, err
+}
+
+// AverageField - Calculate average using field name: ctx.Files.AverageField("Size")
+func (ds *LinqDbSet[T]) AverageField(fieldName string) (float64, error) {
+	var result float64
+	quotedFieldName := fieldName
+	if ds.translator != nil {
+		quotedFieldName = ds.translator.GetQuotedFieldName(fieldName)
+	}
+	
+	err := ds.db.Model(new(T)).Select(fmt.Sprintf("COALESCE(AVG(%s), 0)", quotedFieldName)).Scan(&result).Error
+	return result, err
+}
+
+// Min - Find minimum value of a field
+func (ds *LinqDbSet[T]) Min(selector func(T) interface{}) (interface{}, error) {
+	fieldName := ds.parseFieldSelector(selector)
+	if fieldName == "" {
+		return nil, fmt.Errorf("unable to parse field selector for Min")
+	}
+	
+	var result interface{}
+	quotedFieldName := fieldName
+	if ds.translator != nil {
+		quotedFieldName = ds.translator.GetQuotedFieldName(fieldName)
+	}
+	
+	err := ds.db.Model(new(T)).Select(fmt.Sprintf("MIN(%s)", quotedFieldName)).Scan(&result).Error
+	return result, err
+}
+
+// MinField - Find minimum value using field name: ctx.Files.MinField("Size")
+func (ds *LinqDbSet[T]) MinField(fieldName string) (interface{}, error) {
+	var result interface{}
+	quotedFieldName := fieldName
+	if ds.translator != nil {
+		quotedFieldName = ds.translator.GetQuotedFieldName(fieldName)
+	}
+	
+	err := ds.db.Model(new(T)).Select(fmt.Sprintf("MIN(%s)", quotedFieldName)).Scan(&result).Error
+	return result, err
+}
+
+// Max - Find maximum value of a field
+func (ds *LinqDbSet[T]) Max(selector func(T) interface{}) (interface{}, error) {
+	fieldName := ds.parseFieldSelector(selector)
+	if fieldName == "" {
+		return nil, fmt.Errorf("unable to parse field selector for Max")
+	}
+	
+	var result interface{}
+	quotedFieldName := fieldName
+	if ds.translator != nil {
+		quotedFieldName = ds.translator.GetQuotedFieldName(fieldName)
+	}
+	
+	err := ds.db.Model(new(T)).Select(fmt.Sprintf("MAX(%s)", quotedFieldName)).Scan(&result).Error
+	return result, err
+}
+
+// MaxField - Find maximum value using field name: ctx.Files.MaxField("Size")
+func (ds *LinqDbSet[T]) MaxField(fieldName string) (interface{}, error) {
+	var result interface{}
+	quotedFieldName := fieldName
+	if ds.translator != nil {
+		quotedFieldName = ds.translator.GetQuotedFieldName(fieldName)
+	}
+	
+	err := ds.db.Model(new(T)).Select(fmt.Sprintf("MAX(%s)", quotedFieldName)).Scan(&result).Error
+	return result, err
+}
+
+// Include - Type-safe Include with field name validation: query.Include("Buckets", "Sessions")
+// Validates field names exist on the entity type and panics with clear error if not
+func (ds *LinqDbSet[T]) Include(fieldNames ...string) *LinqDbSet[T] {
+	// Validate all field names exist on the entity type
+	var zero T
+	entityType := reflect.TypeOf(zero)
+	if entityType.Kind() == reflect.Ptr {
+		entityType = entityType.Elem()
+	}
+	
+	for _, fieldName := range fieldNames {
+		if _, found := entityType.FieldByName(fieldName); !found {
+			panic(fmt.Sprintf("Field '%s' not found on %s", fieldName, entityType.Name()))
+		}
+	}
+	
+	// Apply GORM preloading
+	newDb := ds.db
+	for _, association := range fieldNames {
+		newDb = newDb.Preload(association)
+	}
+	
+	return &LinqDbSet[T]{
+		db:         newDb,
+		entityType: ds.entityType,
+		context:    ds.context,
+		translator: ds.translator,
+		tableName:  ds.tableName,
+	}
+}
+
+
+// IncludeAll - Load all relationships automatically by detecting GORM foreign key tags
+func (ds *LinqDbSet[T]) IncludeAll() *LinqDbSet[T] {
+	var zero T
+	value := reflect.ValueOf(zero)
+	if value.Kind() == reflect.Ptr {
+		value = value.Elem()
+	}
+	entityType := value.Type()
+	
+	newDb := ds.db
+	
+	// Find all relationship fields by looking for slices and struct references
+	for i := 0; i < entityType.NumField(); i++ {
+		field := entityType.Field(i)
+		fieldType := field.Type
+		
+		// Skip unexported fields
+		if field.PkgPath != "" {
+			continue
+		}
+		
+		// Check for slice relationships (e.g., []Bucket)
+		if fieldType.Kind() == reflect.Slice {
+			elemType := fieldType.Elem()
+			if elemType.Kind() == reflect.Struct {
+				// This is likely a relationship - use field name for preload
+				newDb = newDb.Preload(field.Name)
+			}
+		}
+		
+		// Check for single struct relationships (e.g., User in Bucket.Owner)
+		if fieldType.Kind() == reflect.Struct && fieldType.PkgPath() != "" {
+			// This might be a belongs-to relationship
+			newDb = newDb.Preload(field.Name)
+		}
+		
+		// Check for pointer to struct relationships (e.g., *User)
+		if fieldType.Kind() == reflect.Ptr && fieldType.Elem().Kind() == reflect.Struct {
+			newDb = newDb.Preload(field.Name)
+		}
+	}
+	
+	return &LinqDbSet[T]{
+		db:         newDb,
+		entityType: ds.entityType,
+		context:    ds.context,
+		translator: ds.translator,
+		tableName:  ds.tableName,
+	}
+}
+
+// Select - Choose specific fields to load: context.Users.Select("Id", "Username", "Email")
+// For aggregations, chain with Scan(): ctx.Files.Select("COALESCE(SUM(size), 0)").Scan(&total)
+// For typed aggregations, use: ctx.Files.SumField("Size") or ctx.Files.Sum(func(f File) interface{} { return f.Size })
+func (ds *LinqDbSet[T]) Select(fields ...string) *LinqDbSet[T] {
+	newDb := ds.db.Select(fields)
+	
+	return &LinqDbSet[T]{
+		db:         newDb,
+		entityType: ds.entityType,
+		context:    ds.context,
+		translator: ds.translator,
+		tableName:  ds.tableName,
+	}
+}
+
+// Omit - Exclude specific fields from loading: context.Users.Omit("PasswordHash")
+func (ds *LinqDbSet[T]) Omit(fields ...string) *LinqDbSet[T] {
+	newDb := ds.db.Omit(fields...)
+	
+	return &LinqDbSet[T]{
+		db:         newDb,
+		entityType: ds.entityType,
+		context:    ds.context,
+		translator: ds.translator,
+		tableName:  ds.tableName,
+	}
 }

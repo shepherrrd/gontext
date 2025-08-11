@@ -1029,7 +1029,7 @@ func (mm *MigrationManager) generateInitialOperations() ([]models.MigrationOpera
 
 // sortEntitiesByDependencies sorts entities so parent tables are created before child tables
 // Uses dynamic topological sorting based on foreign key relationships detected from GORM tags
-func (mm *MigrationManager) sortEntitiesByDependencies(entityModels map[reflect.Type]*models.EntityModel) []*models.EntityModel {
+func (mm *MigrationManager) sortEntitiesByDependencies(entityModels map[string]*models.EntityModel) []*models.EntityModel {
 	// Build dependency graph from foreign key relationships
 	dependencies := make(map[string][]string) // entity -> list of entities it depends on
 	allEntities := make(map[string]*models.EntityModel)
@@ -1199,7 +1199,7 @@ func (mm *MigrationManager) generateOperationsFromComparison(comparison *models.
 	return operations, nil
 }
 
-func (mm *MigrationManager) createTableOperationFromSnapshot(entitySnapshot models.EntitySnapshot, driver drivers.DatabaseDriver, entityModels map[reflect.Type]*models.EntityModel) models.MigrationOperation {
+func (mm *MigrationManager) createTableOperationFromSnapshot(entitySnapshot models.EntitySnapshot, driver drivers.DatabaseDriver, entityModels map[string]*models.EntityModel) models.MigrationOperation {
 	var columns []models.ColumnDefinition
 
 	for _, field := range entitySnapshot.Fields {
@@ -1272,7 +1272,7 @@ func (mm *MigrationManager) parseForeignKeyFromTags(tags map[string]string, enti
 }
 
 // parseForeignKeyFromFieldName checks field names for common foreign key patterns dynamically
-func (mm *MigrationManager) parseForeignKeyFromFieldName(fieldName string, entityModels map[reflect.Type]*models.EntityModel) *models.ForeignKeyReference {
+func (mm *MigrationManager) parseForeignKeyFromFieldName(fieldName string, entityModels map[string]*models.EntityModel) *models.ForeignKeyReference {
 	fieldNameLower := strings.ToLower(fieldName)
 	
 	// Only create foreign keys for UUID fields that match specific patterns

@@ -4,7 +4,6 @@ import (
 	"crypto/md5"
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"time"
 )
 
@@ -39,7 +38,7 @@ type IndexSnapshot struct {
 	IsUnique bool     `json:"is_unique"`
 }
 
-func NewModelSnapshot(entities map[reflect.Type]*EntityModel) *ModelSnapshot {
+func NewModelSnapshot(entities map[string]*EntityModel) *ModelSnapshot {
 	snapshot := &ModelSnapshot{
 		Version:   "1.0.0",
 		Timestamp: time.Now(),

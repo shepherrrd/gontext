@@ -10,12 +10,14 @@ GoNtext brings the familiar **Entity Framework Core** patterns to Go, providing 
 
 - **🎯 EF Core-Style API**: Familiar patterns for .NET developers
 - **🔍 LINQ Queries**: Type-safe querying with method chaining
+- **🔗 Include/Select Support**: Load relationships and specific fields
 - **📊 Change Tracking**: Automatic entity change detection
 - **🔄 Migrations**: Code-first database migrations with Go files
 - **💾 DbSets**: Type-safe entity collections with generics
 - **🗃️ Multiple Databases**: PostgreSQL, MySQL, SQLite support
 - **🐘 PostgreSQL Pascal Case**: Automatic field name translation with quoted identifiers
 - **🚀 Zero Configuration**: Automatic database-specific optimizations
+- **⚡ Field Validation**: Runtime validation with clear error messages
 
 ## 🚀 Quick Start
 
@@ -71,8 +73,9 @@ func NewAppContext(connectionString string) (*AppContext, error) {
 ### ✨ How It Works
 
 When using PostgreSQL, GoNtext automatically:
+
 - **Uses struct names as table names**: `User` struct → `"User"` table (not `users`)
-- **Uses field names as column names**: `Username` field → `"Username"` column  
+- **Uses field names as column names**: `Username` field → `"Username"` column
 - **Quotes all identifiers**: Proper PostgreSQL case-sensitive handling
 - **Translates all queries**: WHERE, ORDER BY, SELECT - everything works automatically
 
@@ -96,7 +99,7 @@ userSet := gontext.RegisterEntity[User](ctx)
 user, _ := userSet.WhereField("Username", "john").FirstOrDefault()
 // SQL: SELECT * FROM "User" WHERE "Username" = 'john'
 
-users, _ := userSet.OrderByField("Email").ToList()  
+users, _ := userSet.OrderByField("Email").ToList()
 // SQL: SELECT * FROM "User" ORDER BY "Email" ASC
 
 userSet.WhereField("IsActive", true).Delete()
@@ -114,6 +117,7 @@ userSet.WhereField("IsActive", true).Delete()
 ### 🚫 No More TableName() Methods
 
 **OLD WAY** (not needed anymore):
+
 ```go
 func (User) TableName() string {
     return "User" // ❌ Don't do this anymore!
@@ -121,6 +125,7 @@ func (User) TableName() string {
 ```
 
 **NEW WAY** (automatic):
+
 ```go
 type User struct {
     // Just define your struct - GoNtext handles the rest! ✅
@@ -130,6 +135,67 @@ type User struct {
 ```
 
 GoNtext automatically uses the struct name (`User`) as the table name with proper PostgreSQL quoting.
+
+## 🔗 Include & Select - Loading Relationships
+
+**GoNtext provides EF Core-style Include and Select functionality with type safety!**
+
+### ✨ Include Relationships
+
+```go
+// Include single relationship
+users, _ := ctx.Users.Include("Posts").ToList()
+
+// Include multiple relationships
+users, _ := ctx.Users.Include("Posts", "Profile").ToList()
+
+// Auto-include all relationships
+users, _ := ctx.Users.IncludeAll().ToList()
+
+// Chain with other operations
+users, _ := ctx.Users.Include("Posts").Where("IsActive", true).ToList()
+```
+
+### 🎯 Select Specific Fields
+
+```go
+// Select only specific fields
+users, _ := ctx.Users.Select("ID", "Username", "Email").ToList()
+
+// Exclude sensitive fields
+users, _ := ctx.Users.Omit("PasswordHash").ToList()
+
+// Combine Include and Select
+users, _ := ctx.Users.Include("Posts").Select("ID", "Username").ToList()
+```
+
+### ⚡ Type Safety & Validation
+
+```go
+// ✅ Valid - compiles and runs
+users, _ := ctx.Users.Include("Posts").ToList()
+
+// ❌ Invalid - panics with: Field 'Post' not found on User
+users, _ := ctx.Users.Include("Post").ToList()  // Typo in field name
+```
+
+**GoNtext validates field names at runtime and provides clear error messages for fast debugging.**
+
+### 🚀 Real-World Example
+
+```go
+// Load users with their posts and profiles, excluding sensitive data
+results, _ := ctx.Users.
+    Include("Posts", "Profile").
+    Omit("PasswordHash").
+    Where("IsActive", true).
+    OrderBy("Username").
+    Skip(0).Take(10).
+    ToList()
+
+// Auto-detect and load all relationships
+users, _ := ctx.Users.IncludeAll().ToList()
+```
 
 ## 🏷️ Custom Table Names
 
@@ -144,7 +210,7 @@ type User struct {
     Email    string    `gorm:"uniqueIndex;not null"`
 }
 
-// Custom table name - overrides default "User" 
+// Custom table name - overrides default "User"
 func (User) TableName() string {
     return "app_users" // Will create "app_users" table instead of "User"
 }
@@ -162,7 +228,7 @@ type Product struct {
 GoNtext respects the `TableName()` method across **all operations**:
 
 - ✅ **CRUD Operations**: `ctx.Users.Add()`, `ctx.Users.Find()`, etc. use custom table name
-- ✅ **LINQ Queries**: `ctx.Users.WhereField().ToList()` uses custom table name  
+- ✅ **LINQ Queries**: `ctx.Users.WhereField().ToList()` uses custom table name
 - ✅ **Migrations**: Migration files generate SQL for custom table names
 - ✅ **PostgreSQL**: Automatically quotes custom table names: `"app_users"`
 
@@ -207,7 +273,7 @@ product, _ := productSet.WhereField("Name", "laptop").FirstOrDefault()
 // Pattern 1: SQL with parameters (traditional)
 user, _ := ctx.Users.Where("Email = ?", "test@example.com").FirstOrDefault()
 
-// Pattern 2: Field name with value (EF Core style)  
+// Pattern 2: Field name with value (EF Core style)
 user, _ := ctx.Users.Where("Email", "test@example.com").FirstOrDefault()
 
 // Pattern 3: Struct pattern (GORM style) ✨ NEW!
@@ -269,11 +335,11 @@ func LoginUser(emailOrUsername, password string) (*User, error) {
     user, err := ctx.Users.WhereField("email", emailOrUsername).
                            OrField("username", emailOrUsername).
                            FirstOrDefault()
-    
+
     if err != nil || user == nil {
         return nil, fmt.Errorf("invalid credentials")
     }
-    
+
     // Verify password...
     return user, nil
 }
@@ -291,21 +357,27 @@ func LoginUser(emailOrUsername, password string) (*User, error) {
 Choose what you want to learn:
 
 ### 🔨 [Basic CRUD Operations](./examples/01-crud/)
+
 Learn the fundamentals:
+
 - Creating entities
-- Saving changes  
+- Saving changes
 - Querying data
 - Updates and deletes
 
 ### 🗃️ [Migrations & Schema](./examples/02-migrations/)
+
 Database schema management:
+
 - Creating migrations
 - Model snapshots
 - Schema evolution
 - Database updates
 
 ### 🔍 [LINQ Queries](./examples/03-linq/)
+
 Advanced querying:
+
 - Where conditions
 - Ordering and pagination
 - String operations
@@ -317,6 +389,7 @@ Advanced querying:
 **The built-in CLI has limitations**. For proper migrations, you need to set up entity registration:
 
 ### Step 1: Create Design-Time Context
+
 ```go
 // File: migrations_context.go
 func CreateDesignTimeContext() (*gontext.DbContext, error) {
@@ -335,6 +408,7 @@ func CreateDesignTimeContext() (*gontext.DbContext, error) {
 ```
 
 ### Step 2: Add Migration Commands
+
 ```go
 // Add to your main.go
 func handleMigrations() {
@@ -362,31 +436,31 @@ GoNtext brings the best of Entity Framework Core to Go!
 
 ### EF Core vs GoNtext
 
-| EF Core (C#) | GoNtext (Go) |
-|--------------|--------------|
-| `context.Users.Add(user)` | `ctx.Users.Add(user); ctx.SaveChanges()` |
-| `context.SaveChanges()` | `ctx.SaveChanges()` |
-| `context.Users.Where(x => x.IsActive).ToList()` | `ctx.Users.WhereField("IsActive", true).ToList()` |
-| `context.Users.Where(x => x.IsActive).ToList()` | `ctx.Users.Where(&User{IsActive: true}).ToList()` ✨ |
-| `context.Users.FirstOrDefault(x => x.Id == id)` | `ctx.Users.ById(id)` |
-| `context.Users.FirstOrDefault(x => x.Id == id)` | `ctx.Users.First(&User{Id: id})` ✨ |
-| `context.Users.OrderBy(x => x.Email)` | `ctx.Users.OrderByField("Email")` |
-| Pascal case tables (`Users`) | Pascal case tables (`"User"`) ✨ |
-| Pascal case columns (`IsActive`) | Pascal case columns (`"IsActive"`) ✨ |
-| `[Table("app_users")] class User` | `func (User) TableName() string { return "app_users" }` ✨ |
+| EF Core (C#)                                    | GoNtext (Go)                                               |
+| ----------------------------------------------- | ---------------------------------------------------------- |
+| `context.Users.Add(user)`                       | `ctx.Users.Add(user); ctx.SaveChanges()`                   |
+| `context.SaveChanges()`                         | `ctx.SaveChanges()`                                        |
+| `context.Users.Where(x => x.IsActive).ToList()` | `ctx.Users.WhereField("IsActive", true).ToList()`          |
+| `context.Users.Where(x => x.IsActive).ToList()` | `ctx.Users.Where(&User{IsActive: true}).ToList()` ✨       |
+| `context.Users.FirstOrDefault(x => x.Id == id)` | `ctx.Users.ById(id)`                                       |
+| `context.Users.FirstOrDefault(x => x.Id == id)` | `ctx.Users.First(&User{Id: id})` ✨                        |
+| `context.Users.OrderBy(x => x.Email)`           | `ctx.Users.OrderByField("Email")`                          |
+| Pascal case tables (`Users`)                    | Pascal case tables (`"User"`) ✨                           |
+| Pascal case columns (`IsActive`)                | Pascal case columns (`"IsActive"`) ✨                      |
+| `[Table("app_users")] class User`               | `func (User) TableName() string { return "app_users" }` ✨ |
 
 ### GORM vs GoNtext
 
-| GORM (Go) | GoNtext (Go) |
-|-----------|--------------|
-| `db.Where(&User{Email: "test"}).First(&user)` | `ctx.Users.Where(&User{Email: "test"}).FirstOrDefault()` ✨ |
+| GORM (Go)                                                                | GoNtext (Go)                                                                        |
+| ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| `db.Where(&User{Email: "test"}).First(&user)`                            | `ctx.Users.Where(&User{Email: "test"}).FirstOrDefault()` ✨                         |
 | `db.Where("email = ?", email).Or("username = ?", username).First(&user)` | `ctx.Users.Where("Email", email).OrField("Username", username).FirstOrDefault()` ✨ |
-| `db.Create(&user)` | `ctx.Users.Create(&user)` ✨ |
-| `db.Save(&user)` | `ctx.Users.Save(&user)` ✨ |
-| `db.First(&user, id)` | `ctx.Users.Find(id)` ✨ |
-| Manual change tracking | Automatic change tracking ✨ |
-| Manual migrations | Code-first migrations ✨ |
-| Snake_case by default | Pascal case with PostgreSQL ✨ |
+| `db.Create(&user)`                                                       | `ctx.Users.Create(&user)` ✨                                                        |
+| `db.Save(&user)`                                                         | `ctx.Users.Save(&user)` ✨                                                          |
+| `db.First(&user, id)`                                                    | `ctx.Users.Find(id)` ✨                                                             |
+| Manual change tracking                                                   | Automatic change tracking ✨                                                        |
+| Manual migrations                                                        | Code-first migrations ✨                                                            |
+| Snake_case by default                                                    | Pascal case with PostgreSQL ✨                                                      |
 
 ### 🎯 Best of Both Worlds
 
@@ -399,8 +473,9 @@ GoNtext brings the best of Entity Framework Core to Go!
 
 ## 📖 Documentation
 
+- **[📚 Complete API Reference](./API_REFERENCE.md)** - Full documentation of all GoNtext LINQ methods
 - [CRUD Operations Guide](./examples/01-crud/README.md)
-- [Migrations Setup Guide](./examples/02-migrations/README.md)  
+- [Migrations Setup Guide](./examples/02-migrations/README.md)
 - [LINQ Queries Guide](./examples/03-linq/README.md)
 
 ## 🏃‍♂️ Quick Test
