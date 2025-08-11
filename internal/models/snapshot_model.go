@@ -4,6 +4,7 @@ import (
 	"crypto/md5"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -123,9 +124,42 @@ func (s *ModelSnapshot) Compare(other *ModelSnapshot) *SnapshotComparison {
 
 func (s *ModelSnapshot) compareEntities(current, other EntitySnapshot) []SnapshotChange {
 	var changes []SnapshotChange
+	
+	// First pass: identify all renames to avoid double-processing
+	renamedFields := make(map[string]string) // oldName -> newName
+	fieldsInvolved := make(map[string]bool)  // track fields involved in renames
+	
+	// Find all rename operations first
+	for oldFieldName, otherField := range other.Fields {
+		if _, exists := current.Fields[oldFieldName]; !exists {
+			// Field doesn't exist with same name, check if it's renamed
+			if newFieldName := s.findRenamedField(otherField, current.Fields); newFieldName != nil {
+				renamedFields[oldFieldName] = *newFieldName
+				fieldsInvolved[oldFieldName] = true
+				fieldsInvolved[*newFieldName] = true
+				
+				// Add rename operation
+				changes = append(changes, SnapshotChange{
+					Type:       FieldRenamed,
+					EntityName: current.Name,
+					FieldName:  &oldFieldName,
+					Details: FieldRename{
+						OldName: oldFieldName,
+						NewName: *newFieldName,
+						Field:   current.Fields[*newFieldName],
+					},
+				})
+			}
+		}
+	}
 
-	// Compare fields
+	// Second pass: handle field modifications and additions (excluding renamed fields)
 	for fieldName, currentField := range current.Fields {
+		if fieldsInvolved[fieldName] {
+			// Skip fields involved in renames
+			continue
+		}
+		
 		if otherField, exists := other.Fields[fieldName]; exists {
 			// Check for field modifications
 			if !s.fieldsEqual(currentField, otherField) {
@@ -140,7 +174,7 @@ func (s *ModelSnapshot) compareEntities(current, other EntitySnapshot) []Snapsho
 				})
 			}
 		} else {
-			// New field
+			// New field (not involved in rename)
 			changes = append(changes, SnapshotChange{
 				Type:       FieldAdded,
 				EntityName: current.Name,
@@ -150,29 +184,21 @@ func (s *ModelSnapshot) compareEntities(current, other EntitySnapshot) []Snapsho
 		}
 	}
 
-	// Check for removed fields
+	// Third pass: handle field removals (excluding renamed fields)
 	for fieldName, otherField := range other.Fields {
+		if fieldsInvolved[fieldName] {
+			// Skip fields involved in renames
+			continue
+		}
+		
 		if _, exists := current.Fields[fieldName]; !exists {
-			// Check if this is a rename operation
-			if newFieldName := s.findRenamedField(otherField, current.Fields); newFieldName != nil {
-				changes = append(changes, SnapshotChange{
-					Type:       FieldRenamed,
-					EntityName: current.Name,
-					FieldName:  &fieldName,
-					Details: FieldRename{
-						OldName: fieldName,
-						NewName: *newFieldName,
-						Field:   current.Fields[*newFieldName],
-					},
-				})
-			} else {
-				changes = append(changes, SnapshotChange{
-					Type:       FieldRemoved,
-					EntityName: current.Name,
-					FieldName:  &fieldName,
-					Details:    otherField,
-				})
-			}
+			// Field was removed (not renamed)
+			changes = append(changes, SnapshotChange{
+				Type:       FieldRemoved,
+				EntityName: current.Name,
+				FieldName:  &fieldName,
+				Details:    otherField,
+			})
 		}
 	}
 
@@ -180,15 +206,92 @@ func (s *ModelSnapshot) compareEntities(current, other EntitySnapshot) []Snapsho
 }
 
 func (s *ModelSnapshot) findRenamedField(oldField FieldSnapshot, currentFields map[string]FieldSnapshot) *string {
+	// First check for explicit old_name tag
 	for fieldName, currentField := range currentFields {
-		// Check if this field has an old_name tag that matches the old field
 		if oldName, exists := currentField.Tags["old_name"]; exists {
 			if oldName == oldField.ColumnName || oldName == oldField.Name {
 				return &fieldName
 			}
 		}
 	}
+	
+	// Enhanced heuristic-based rename detection
+	// Look for fields that match the old field's characteristics but have different names
+	var candidates []string
+	
+	for fieldName, currentField := range currentFields {
+		// Skip if field name is the same (not a rename)
+		if fieldName == oldField.Name {
+			continue
+		}
+		
+		// Check if the field types and characteristics match exactly
+		if s.fieldsMatch(oldField, currentField) {
+			candidates = append(candidates, fieldName)
+		}
+	}
+	
+	// If we found exactly one candidate, it's likely a rename
+	if len(candidates) == 1 {
+		return &candidates[0]
+	}
+	
+	// If multiple candidates, try to find the best match using name similarity
+	if len(candidates) > 1 {
+		bestMatch := s.findBestNameMatch(oldField.Name, candidates)
+		if bestMatch != nil {
+			return bestMatch
+		}
+	}
+	
 	return nil
+}
+
+// fieldsMatch checks if two fields have identical characteristics (type, constraints, etc.)
+func (s *ModelSnapshot) fieldsMatch(field1, field2 FieldSnapshot) bool {
+	return field1.Type == field2.Type &&
+		field1.IsPrimary == field2.IsPrimary &&
+		field1.IsNullable == field2.IsNullable &&
+		field1.IsUnique == field2.IsUnique &&
+		s.defaultValuesMatch(field1.DefaultValue, field2.DefaultValue)
+}
+
+// defaultValuesMatch compares default values properly handling nil cases
+func (s *ModelSnapshot) defaultValuesMatch(val1, val2 *string) bool {
+	if val1 == nil && val2 == nil {
+		return true
+	}
+	if val1 != nil && val2 != nil {
+		return *val1 == *val2
+	}
+	return false
+}
+
+// findBestNameMatch finds the most similar field name using simple string similarity
+func (s *ModelSnapshot) findBestNameMatch(oldName string, candidates []string) *string {
+	if len(candidates) == 0 {
+		return nil
+	}
+	
+	// Simple heuristics for common rename patterns
+	oldLower := strings.ToLower(oldName)
+	
+	for _, candidate := range candidates {
+		candidateLower := strings.ToLower(candidate)
+		
+		// Check for common patterns like UpdatedAt -> UpdatedAtTime
+		if strings.HasPrefix(candidateLower, oldLower) || strings.HasPrefix(oldLower, candidateLower) {
+			return &candidate
+		}
+		
+		// Check if one contains the other (e.g., "UpdatedAt" and "UpdatedAtTime")
+		if strings.Contains(candidateLower, oldLower) || strings.Contains(oldLower, candidateLower) {
+			return &candidate
+		}
+	}
+	
+	// If no clear pattern match, return the first candidate
+	return &candidates[0]
 }
 
 func (s *ModelSnapshot) fieldsEqual(field1, field2 FieldSnapshot) bool {

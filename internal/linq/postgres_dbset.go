@@ -420,11 +420,6 @@ func (ds *PostgreSQLLinqDbSet[T]) Omit(fields ...string) *PostgreSQLLinqDbSet[T]
 	}
 }
 
-// Scan - Execute query and scan results into destination with PostgreSQL field translation
-// Example: var total int64; err := ctx.Files.Select("COALESCE(SUM(\"Size\"), 0)").Scan(&total)
-func (ds *PostgreSQLLinqDbSet[T]) Scan(dest interface{}) error {
-	return ds.LinqDbSet.db.Scan(dest).Error
-}
 
 // SumField - Calculate sum using field name with PostgreSQL translation: ctx.Files.SumField("Size")
 func (ds *PostgreSQLLinqDbSet[T]) SumField(fieldName string) (float64, error) {
