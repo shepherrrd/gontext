@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"log"
 
 	"gorm.io/gorm"
 )
@@ -166,14 +167,36 @@ func (q *LinqQuery[T]) First() (*T, error) {
 
 // FirstOrDefault - returns the first element or zero value
 func (q *LinqQuery[T]) FirstOrDefault() (*T, error) {
+	log.Printf("[GONTEXT DEBUG] FirstOrDefault called on LinqQuery[%T]", *new(T))
+	
+	// Log the query being built
+	sql := q.builder.query.ToSQL(func(tx *gorm.DB) *gorm.DB {
+		return tx.Limit(1)
+	})
+	log.Printf("[GONTEXT DEBUG] Generated SQL: %s", sql)
+	
+	// Log any existing WHERE conditions
+	if len(q.builder.query.Statement.Clauses) > 0 {
+		log.Printf("[GONTEXT DEBUG] Query has %d clauses", len(q.builder.query.Statement.Clauses))
+		for name, clause := range q.builder.query.Statement.Clauses {
+			log.Printf("[GONTEXT DEBUG] Clause: %s = %+v", name, clause)
+		}
+	}
+	
 	var result T
+	log.Printf("[GONTEXT DEBUG] Executing First() query...")
 	err := q.builder.query.First(&result).Error
+	
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {
+			log.Printf("[GONTEXT DEBUG] No record found, returning nil")
 			return nil, nil
 		}
+		log.Printf("[GONTEXT DEBUG] Error occurred: %v", err)
 		return nil, err
 	}
+	
+	log.Printf("[GONTEXT DEBUG] Record found: %+v", result)
 	return &result, nil
 }
 

@@ -5,7 +5,6 @@ import (
 	"log"
 
 	"github.com/shepherrrd/gontext"
-	"github.com/shepherrrd/gontext/drivers"
 )
 
 // User entity with relationships
@@ -31,8 +30,7 @@ type Profile struct {
 
 func main() {
 	// Create database context
-	driver := drivers.NewPostgreSQLDriver()
-	ctx, err := gontext.NewDbContext(driver, "postgres://user:password@localhost/testdb?sslmode=disable")
+	ctx, err := gontext.NewDbContext("postgres://user:password@localhost/testdb?sslmode=disable", "postgres")
 	if err != nil {
 		log.Fatal(err)
 	}

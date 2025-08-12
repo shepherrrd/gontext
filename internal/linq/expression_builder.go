@@ -3,6 +3,7 @@ package linq
 import (
 	"fmt"
 	"reflect"
+	"log"
 	"gorm.io/gorm"
 	"github.com/shepherrrd/gontext/internal/query"
 )
@@ -134,24 +135,62 @@ func (ds *LinqDbSet[T]) Where(args ...interface{}) *LinqDbSet[T] {
 // DEPRECATED OLD PATTERN: user := h.dbContext.Files.FirstOrDefault() - WRONG! Missing error handling
 // CORRECT NEW PATTERN: user, err := h.dbContext.Files.FirstOrDefault(); if err != nil { ... }
 func (ds *LinqDbSet[T]) FirstOrDefault(predicate ...Expression[T]) (*T, error) {
+	log.Printf("[GONTEXT DEBUG] LinqDbSet[%T].FirstOrDefault called with %d predicates", *new(T), len(predicate))
+	
 	query := ds.db.Model(new(T))
+	log.Printf("[GONTEXT DEBUG] Created base query for table: %s", ds.tableName)
 	
 	if len(predicate) > 0 {
 		// Convert lambda to SQL - simplified approach
 		condition := ds.parseExpression(predicate[0])
 		if condition != "" {
+			log.Printf("[GONTEXT DEBUG] Adding predicate condition: %s", condition)
 			query = query.Where(condition)
+		} else {
+			log.Printf("[GONTEXT DEBUG] Warning: Could not parse predicate expression")
 		}
 	}
 	
+	// Log the SQL query - use a more direct approach
+	sql := query.ToSQL(func(tx *gorm.DB) *gorm.DB {
+		var dummy T
+		return tx.First(&dummy)
+	})
+	log.Printf("[GONTEXT DEBUG] Generated SQL: %s", sql)
+	
+	// Also log the table name being queried
+	log.Printf("[GONTEXT DEBUG] Querying table: %s", ds.tableName)
+	
+	// Log database driver and session info
+	log.Printf("[GONTEXT DEBUG] Database driver: %s", ds.db.Dialector.Name())
+	if ds.translator != nil {
+		log.Printf("[GONTEXT DEBUG] Using PostgreSQL translator for table: %s", ds.tableName)
+	}
+	
+	// Log any existing clauses
+	if len(query.Statement.Clauses) > 0 {
+		log.Printf("[GONTEXT DEBUG] Query has %d clauses", len(query.Statement.Clauses))
+		for name, clause := range query.Statement.Clauses {
+			log.Printf("[GONTEXT DEBUG] Clause: %s = %+v", name, clause)
+		}
+	} else {
+		log.Printf("[GONTEXT DEBUG] No WHERE clauses - will return first record from table")
+	}
+	
 	var result T
+	log.Printf("[GONTEXT DEBUG] Executing First() query...")
 	err := query.First(&result).Error
+	
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {
+			log.Printf("[GONTEXT DEBUG] No record found (ErrRecordNotFound), returning nil")
 			return nil, nil // Return nil for default
 		}
+		log.Printf("[GONTEXT DEBUG] Error occurred during query: %v", err)
 		return nil, err
 	}
+	
+	log.Printf("[GONTEXT DEBUG] Record found successfully: %+v", result)
 	return &result, nil
 }
 
@@ -255,36 +294,130 @@ func (ds *LinqDbSet[T]) Count(predicate ...Expression[T]) (int64, error) {
 
 // ToList - gets all elements matching predicate
 func (ds *LinqDbSet[T]) ToList(predicate ...Expression[T]) ([]T, error) {
+	log.Printf("[GONTEXT DEBUG] LinqDbSet[%T].ToList called with %d predicates", *new(T), len(predicate))
+	
 	query := ds.db.Model(new(T))
 	
 	if len(predicate) > 0 {
 		condition := ds.parseExpression(predicate[0])
 		if condition != "" {
+			log.Printf("[GONTEXT DEBUG] Adding predicate condition: %s", condition)
 			query = query.Where(condition)
+		} else {
+			log.Printf("[GONTEXT DEBUG] Warning: Could not parse predicate expression in ToList")
 		}
 	}
 	
+	// Log the SQL query
+	sql := query.ToSQL(func(tx *gorm.DB) *gorm.DB {
+		return tx.Find(new([]T))
+	})
+	log.Printf("[GONTEXT DEBUG] Generated SQL for ToList: %s", sql)
+	
+	// Log existing clauses
+	if len(query.Statement.Clauses) > 0 {
+		log.Printf("[GONTEXT DEBUG] ToList query has %d clauses", len(query.Statement.Clauses))
+		for name, clause := range query.Statement.Clauses {
+			log.Printf("[GONTEXT DEBUG] ToList Clause: %s = %+v", name, clause)
+		}
+	} else {
+		log.Printf("[GONTEXT DEBUG] ToList: No WHERE clauses - will return all records from table")
+	}
+	
 	var results []T
+	log.Printf("[GONTEXT DEBUG] Executing Find() query...")
 	err := query.Find(&results).Error
+	
+	if err != nil {
+		log.Printf("[GONTEXT DEBUG] ToList error: %v", err)
+		return results, err
+	}
+	
+	log.Printf("[GONTEXT DEBUG] ToList found %d records", len(results))
 	return results, err
 }
 
-// OrderBy - orders by field selector
-func (ds *LinqDbSet[T]) OrderBy(selector func(T) interface{}) *LinqDbSet[T] {
-	// Parse field name from selector
-	fieldName := ds.parseFieldSelector(selector)
-	if fieldName != "" {
-		ds.db = ds.db.Order(fieldName + " ASC")
+// OrderBy - overloaded method that supports multiple patterns:
+// 1. OrderBy(func(T) interface{}) - field selector function
+// 2. OrderBy("fieldName") - field name string
+func (ds *LinqDbSet[T]) OrderBy(args ...interface{}) *LinqDbSet[T] {
+	if len(args) == 0 {
+		return ds
 	}
+	
+	// Pattern 1: Function selector OrderBy(func(T) interface{})
+	if len(args) == 1 {
+		if selector, ok := args[0].(func(T) interface{}); ok {
+			fieldName := ds.parseFieldSelector(selector)
+			if fieldName != "" {
+				quotedFieldName := fieldName
+				if ds.translator != nil {
+					quotedFieldName = ds.translator.GetQuotedFieldName(fieldName)
+				}
+				ds.db = ds.db.Order(quotedFieldName + " ASC")
+			}
+			return ds
+		}
+		
+		// Pattern 2: String field name OrderBy("fieldName")
+		if fieldName, ok := args[0].(string); ok {
+			log.Printf("[GONTEXT DEBUG] LinqDbSet[%T].OrderBy called with field name: %s", *new(T), fieldName)
+			
+			quotedFieldName := fieldName
+			if ds.translator != nil {
+				quotedFieldName = ds.translator.GetQuotedFieldName(fieldName)
+				log.Printf("[GONTEXT DEBUG] Field name translated: %s -> %s", fieldName, quotedFieldName)
+			}
+			
+			orderClause := quotedFieldName + " ASC"
+			log.Printf("[GONTEXT DEBUG] Adding ORDER BY: %s", orderClause)
+			ds.db = ds.db.Order(orderClause)
+			return ds
+		}
+	}
+	
 	return ds
 }
 
-// OrderByDescending - orders by field selector descending
-func (ds *LinqDbSet[T]) OrderByDescending(selector func(T) interface{}) *LinqDbSet[T] {
-	fieldName := ds.parseFieldSelector(selector)
-	if fieldName != "" {
-		ds.db = ds.db.Order(fieldName + " DESC")
+// OrderByDescending - overloaded method that supports multiple patterns:
+// 1. OrderByDescending(func(T) interface{}) - field selector function
+// 2. OrderByDescending("fieldName") - field name string
+func (ds *LinqDbSet[T]) OrderByDescending(args ...interface{}) *LinqDbSet[T] {
+	if len(args) == 0 {
+		return ds
 	}
+	
+	// Pattern 1: Function selector OrderByDescending(func(T) interface{})
+	if len(args) == 1 {
+		if selector, ok := args[0].(func(T) interface{}); ok {
+			fieldName := ds.parseFieldSelector(selector)
+			if fieldName != "" {
+				quotedFieldName := fieldName
+				if ds.translator != nil {
+					quotedFieldName = ds.translator.GetQuotedFieldName(fieldName)
+				}
+				ds.db = ds.db.Order(quotedFieldName + " DESC")
+			}
+			return ds
+		}
+		
+		// Pattern 2: String field name OrderByDescending("fieldName")
+		if fieldName, ok := args[0].(string); ok {
+			log.Printf("[GONTEXT DEBUG] LinqDbSet[%T].OrderByDescending called with field name: %s", *new(T), fieldName)
+			
+			quotedFieldName := fieldName
+			if ds.translator != nil {
+				quotedFieldName = ds.translator.GetQuotedFieldName(fieldName)
+				log.Printf("[GONTEXT DEBUG] Field name translated: %s -> %s", fieldName, quotedFieldName)
+			}
+			
+			orderClause := quotedFieldName + " DESC"
+			log.Printf("[GONTEXT DEBUG] Adding ORDER BY: %s", orderClause)
+			ds.db = ds.db.Order(orderClause)
+			return ds
+		}
+	}
+	
 	return ds
 }
 
@@ -333,7 +466,9 @@ func (ds *LinqDbSet[T]) ById(id interface{}) (*T, error) {
 	return &result, nil
 }
 
-// WhereEntity - static typing with entity structs like GORM: context.Users.Where(&User{Id: 1, Name: "test"})
+// WhereEntity - static typing with entity structs with comparison operator support
+// Supports: context.Users.Where(&User{Id: 1, Name: "test"}) for equality
+// Supports: context.Users.Where(&User{Age: ">18"}) for comparison operators
 func (ds *LinqDbSet[T]) WhereEntity(entity T) *LinqDbSet[T] {
 	entityValue := reflect.ValueOf(entity)
 	entityType := reflect.TypeOf(entity)
@@ -368,8 +503,20 @@ func (ds *LinqDbSet[T]) WhereEntity(entity T) *LinqDbSet[T] {
 			quotedFieldName = ds.translator.GetQuotedFieldName(fieldName)
 		}
 		
-		// Add WHERE condition for this field
-		ds.db = ds.db.Where(fmt.Sprintf("%s = ?", quotedFieldName), fieldValue.Interface())
+		// Check if the value is a string with comparison operators
+		value := fieldValue.Interface()
+		if strValue, ok := value.(string); ok {
+			// Parse operator from string value
+			operator, actualValue := ds.parseOperator(strValue)
+			condition := fmt.Sprintf("%s %s ?", quotedFieldName, operator)
+			log.Printf("[GONTEXT DEBUG] Adding entity WHERE condition: %s with value: %s", condition, actualValue)
+			ds.db = ds.db.Where(condition, actualValue)
+		} else {
+			// Default equality comparison
+			condition := fmt.Sprintf("%s = ?", quotedFieldName)
+			log.Printf("[GONTEXT DEBUG] Adding entity WHERE condition: %s with value: %+v", condition, value)
+			ds.db = ds.db.Where(condition, value)
+		}
 	}
 	
 	return ds
@@ -393,37 +540,94 @@ func (ds *LinqDbSet[T]) WhereStruct(entity interface{}) *LinqDbSet[T] {
 	return ds
 }
 
-// WhereField - helper for field-based filtering - EF Core: context.Users.Where(x => x.Field == value)
+// WhereField - helper for field-based filtering with comparison operators
+// DEPRECATED: Use the overloaded Where method instead: Where("fieldName", value) or Where(&Entity{Field: value})
+// Supports: WhereField("Age", 25), WhereField("Age", ">25"), WhereField("Age", ">=18"), etc.
 func (ds *LinqDbSet[T]) WhereField(fieldName string, value interface{}) *LinqDbSet[T] {
+	log.Printf("[GONTEXT DEBUG] LinqDbSet[%T].WhereField called: field=%s, value=%+v", *new(T), fieldName, value)
+	
 	// Apply PostgreSQL translation if available
 	quotedFieldName := fieldName
 	if ds.translator != nil {
 		quotedFieldName = ds.translator.GetQuotedFieldName(fieldName)
+		log.Printf("[GONTEXT DEBUG] Field name translated: %s -> %s", fieldName, quotedFieldName)
 	}
 	
-	// Handle different comparison operators embedded in string values
-	if strValue, ok := value.(string); ok {
-		if len(strValue) > 1 && strValue[0] == '>' {
-			if strValue[1] == '=' {
-				ds.db = ds.db.Where(fmt.Sprintf("%s >= ?", quotedFieldName), strValue[2:])
-			} else {
-				ds.db = ds.db.Where(fmt.Sprintf("%s > ?", quotedFieldName), strValue[1:])
-			}
-		} else if len(strValue) > 1 && strValue[0] == '<' {
-			if strValue[1] == '=' {
-				ds.db = ds.db.Where(fmt.Sprintf("%s <= ?", quotedFieldName), strValue[2:])
-			} else {
-				ds.db = ds.db.Where(fmt.Sprintf("%s < ?", quotedFieldName), strValue[1:])
-			}
-		} else if len(strValue) > 1 && strValue[0] == '!' && strValue[1] == '=' {
-			ds.db = ds.db.Where(fmt.Sprintf("%s != ?", quotedFieldName), strValue[2:])
+	return ds.addComparisonCondition(quotedFieldName, value, "WHERE")
+}
+
+// addComparisonCondition - helper to add comparison conditions with operator support
+func (ds *LinqDbSet[T]) addComparisonCondition(quotedFieldName string, value interface{}, conditionType string) *LinqDbSet[T] {
+	// Handle comparison operators for numeric and string types
+	switch v := value.(type) {
+	case string:
+		// Check for operator prefixes in string values
+		operator, actualValue := ds.parseOperator(v)
+		condition := fmt.Sprintf("%s %s ?", quotedFieldName, operator)
+		log.Printf("[GONTEXT DEBUG] Adding %s condition: %s with value: %s", conditionType, condition, actualValue)
+		
+		if conditionType == "WHERE" {
+			ds.db = ds.db.Where(condition, actualValue)
 		} else {
-			ds.db = ds.db.Where(fmt.Sprintf("%s = ?", quotedFieldName), value)
+			ds.db = ds.db.Or(condition, actualValue)
 		}
-	} else {
-		ds.db = ds.db.Where(fmt.Sprintf("%s = ?", quotedFieldName), value)
+		
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64:
+		// For numeric types, support direct comparison
+		condition := fmt.Sprintf("%s = ?", quotedFieldName)
+		log.Printf("[GONTEXT DEBUG] Adding %s condition: %s with value: %+v", conditionType, condition, value)
+		
+		if conditionType == "WHERE" {
+			ds.db = ds.db.Where(condition, value)
+		} else {
+			ds.db = ds.db.Or(condition, value)
+		}
+		
+	default:
+		// Default equality comparison
+		condition := fmt.Sprintf("%s = ?", quotedFieldName)
+		log.Printf("[GONTEXT DEBUG] Adding %s condition: %s with value: %+v", conditionType, condition, value)
+		
+		if conditionType == "WHERE" {
+			ds.db = ds.db.Where(condition, value)
+		} else {
+			ds.db = ds.db.Or(condition, value)
+		}
 	}
+	
+	log.Printf("[GONTEXT DEBUG] Current query has %d clauses after %s", len(ds.db.Statement.Clauses), conditionType)
 	return ds
+}
+
+// parseOperator - parses operator from string value
+func (ds *LinqDbSet[T]) parseOperator(strValue string) (operator string, actualValue string) {
+	if len(strValue) == 0 {
+		return "=", strValue
+	}
+	
+	// Check for two-character operators first
+	if len(strValue) >= 2 {
+		switch strValue[:2] {
+		case ">=":
+			return ">=", strValue[2:]
+		case "<=":
+			return "<=", strValue[2:]
+		case "!=", "<>":
+			return "!=", strValue[2:]
+		}
+	}
+	
+	// Check for single-character operators
+	switch strValue[0] {
+	case '>':
+		return ">", strValue[1:]
+	case '<':
+		return "<", strValue[1:]
+	case '=':
+		return "=", strValue[1:]
+	default:
+		return "=", strValue
+	}
 }
 
 // WhereFieldIn - helper for IN queries - EF Core: context.Users.Where(x => values.Contains(x.Field))
@@ -456,27 +660,92 @@ func (ds *LinqDbSet[T]) WhereFieldBetween(fieldName string, min, max interface{}
 	return ds
 }
 
-// Or - adds OR condition - EF Core: context.Users.Where(x => x.Email == email).Or(x => x.Username == username)
-func (ds *LinqDbSet[T]) Or(condition string, args ...interface{}) *LinqDbSet[T] {
-	quotedCondition := condition
-	if ds.translator != nil {
-		quotedCondition = ds.translator.TranslateQuery(ds.tableName, condition)
+// Or - overloaded method that supports multiple patterns like Where:
+// 1. Or("email = ?", value) - SQL with parameters
+// 2. Or("Email", value) - field name with value
+// 3. Or(&User{Email: "test"}) - entity struct
+func (ds *LinqDbSet[T]) Or(args ...interface{}) *LinqDbSet[T] {
+	if len(args) == 0 {
+		return ds
 	}
-	ds.db = ds.db.Or(quotedCondition, args...)
+	
+	log.Printf("[GONTEXT DEBUG] LinqDbSet[%T].Or called with %d args", *new(T), len(args))
+	
+	// Pattern 1: Entity struct like GORM Or(&User{Email: "test"})
+	if len(args) == 1 {
+		arg := args[0]
+		// Check if it's a pointer to our entity type
+		if entityPtr, ok := arg.(*T); ok {
+			return ds.OrEntity(*entityPtr)
+		}
+		// Check if it's the entity type directly
+		if entity, ok := arg.(T); ok {
+			return ds.OrEntity(entity)
+		}
+		// Check if it's any pointer that we can dereference and cast
+		return ds.OrStruct(arg)
+	}
+	
+	// Pattern 2: Or("Email", value) - field name with value
+	if len(args) == 2 {
+		if fieldName, ok := args[0].(string); ok {
+			return ds.OrField(fieldName, args[1])
+		}
+	}
+	
+	// Pattern 3: Or("email = ?", value) - SQL with parameters
+	if len(args) >= 2 {
+		if condition, ok := args[0].(string); ok {
+			quotedCondition := condition
+			if ds.translator != nil {
+				quotedCondition = ds.translator.TranslateQuery(ds.tableName, condition)
+			}
+			log.Printf("[GONTEXT DEBUG] Adding OR condition: %s", quotedCondition)
+			ds.db = ds.db.Or(quotedCondition, args[1:]...)
+			return ds
+		}
+	}
+	
 	return ds
 }
 
-// OrField - adds OR condition for field comparison - EF Core: context.Users.Where(x => x.Email == email).Or(x => x.Username == username)  
+// OrStruct - helper method to handle Or with any struct type
+func (ds *LinqDbSet[T]) OrStruct(entity interface{}) *LinqDbSet[T] {
+	// Type assertion to T
+	if typedEntity, ok := entity.(T); ok {
+		return ds.OrEntity(typedEntity)
+	}
+	
+	// If it's a pointer, try to dereference and cast
+	entityValue := reflect.ValueOf(entity)
+	if entityValue.Kind() == reflect.Ptr && !entityValue.IsNil() {
+		if typedEntity, ok := entityValue.Elem().Interface().(T); ok {
+			return ds.OrEntity(typedEntity)
+		}
+	}
+	
+	return ds
+}
+
+// OrField - adds OR condition for field comparison with operator support
+// DEPRECATED: Use the overloaded Or method instead: Or("fieldName", value) or Or(&Entity{Field: value})
+// Supports: OrField("Age", 25), OrField("Age", ">25"), OrField("Age", ">=18"), etc.
 func (ds *LinqDbSet[T]) OrField(fieldName string, value interface{}) *LinqDbSet[T] {
+	log.Printf("[GONTEXT DEBUG] LinqDbSet[%T].OrField called: field=%s, value=%+v", *new(T), fieldName, value)
+	
+	// Apply PostgreSQL translation if available
 	quotedFieldName := fieldName
 	if ds.translator != nil {
 		quotedFieldName = ds.translator.GetQuotedFieldName(fieldName)
+		log.Printf("[GONTEXT DEBUG] Field name translated: %s -> %s", fieldName, quotedFieldName)
 	}
-	ds.db = ds.db.Or(fmt.Sprintf("%s = ?", quotedFieldName), value)
-	return ds
+	
+	return ds.addComparisonCondition(quotedFieldName, value, "OR")
 }
 
-// OrEntity - adds OR condition with entity struct like GORM: Where(&User{Email: email}).Or(&User{Username: username})
+// OrEntity - adds OR condition with entity struct with comparison operator support
+// Supports: Where(&User{Email: email}).Or(&User{Username: username}) for equality
+// Supports: Where(&User{Age: ">18"}).Or(&User{Role: "admin"}) for comparison operators
 func (ds *LinqDbSet[T]) OrEntity(entity T) *LinqDbSet[T] {
 	entityValue := reflect.ValueOf(entity)
 	entityType := reflect.TypeOf(entity)
@@ -511,8 +780,20 @@ func (ds *LinqDbSet[T]) OrEntity(entity T) *LinqDbSet[T] {
 			quotedFieldName = ds.translator.GetQuotedFieldName(fieldName)
 		}
 		
-		// Add OR condition for this field
-		ds.db = ds.db.Or(fmt.Sprintf("%s = ?", quotedFieldName), fieldValue.Interface())
+		// Check if the value is a string with comparison operators
+		value := fieldValue.Interface()
+		if strValue, ok := value.(string); ok {
+			// Parse operator from string value
+			operator, actualValue := ds.parseOperator(strValue)
+			condition := fmt.Sprintf("%s %s ?", quotedFieldName, operator)
+			log.Printf("[GONTEXT DEBUG] Adding entity OR condition: %s with value: %s", condition, actualValue)
+			ds.db = ds.db.Or(condition, actualValue)
+		} else {
+			// Default equality comparison
+			condition := fmt.Sprintf("%s = ?", quotedFieldName)
+			log.Printf("[GONTEXT DEBUG] Adding entity OR condition: %s with value: %+v", condition, value)
+			ds.db = ds.db.Or(condition, value)
+		}
 	}
 	
 	return ds
@@ -530,24 +811,96 @@ func (ds *LinqDbSet[T]) WhereFieldNotNull(fieldName string) *LinqDbSet[T] {
 	return ds
 }
 
-// OrderByField - EF Core: context.Users.OrderBy(x => x.Field)
+// OrderByField - EF Core: context.Users.OrderBy("Field")
+// DEPRECATED: Use the overloaded OrderBy method instead: OrderBy("fieldName") or OrderBy(func(T) interface{})
 func (ds *LinqDbSet[T]) OrderByField(fieldName string) *LinqDbSet[T] {
+	log.Printf("[GONTEXT DEBUG] LinqDbSet[%T].OrderByField called (DEPRECATED): field=%s", *new(T), fieldName)
+	
 	quotedFieldName := fieldName
 	if ds.translator != nil {
 		quotedFieldName = ds.translator.GetQuotedFieldName(fieldName)
+		log.Printf("[GONTEXT DEBUG] Field name translated: %s -> %s", fieldName, quotedFieldName)
 	}
-	ds.db = ds.db.Order(quotedFieldName + " ASC")
+	
+	orderClause := quotedFieldName + " ASC"
+	log.Printf("[GONTEXT DEBUG] Adding ORDER BY: %s", orderClause)
+	ds.db = ds.db.Order(orderClause)
 	return ds
 }
 
-// OrderByFieldDescending - EF Core: context.Users.OrderByDescending(x => x.Field)
+// OrderByFieldDescending - EF Core: context.Users.OrderByDescending("Field")
+// DEPRECATED: Use the overloaded OrderByDescending method instead: OrderByDescending("fieldName") or OrderByDescending(func(T) interface{})
 func (ds *LinqDbSet[T]) OrderByFieldDescending(fieldName string) *LinqDbSet[T] {
+	log.Printf("[GONTEXT DEBUG] LinqDbSet[%T].OrderByFieldDescending called (DEPRECATED): field=%s", *new(T), fieldName)
+	
 	quotedFieldName := fieldName
 	if ds.translator != nil {
 		quotedFieldName = ds.translator.GetQuotedFieldName(fieldName)
+		log.Printf("[GONTEXT DEBUG] Field name translated: %s -> %s", fieldName, quotedFieldName)
 	}
-	ds.db = ds.db.Order(quotedFieldName + " DESC")
+	
+	orderClause := quotedFieldName + " DESC"
+	log.Printf("[GONTEXT DEBUG] Adding ORDER BY: %s", orderClause)
+	ds.db = ds.db.Order(orderClause)
 	return ds
+}
+
+// OrderByAscending - Entity-based ordering: context.Users.OrderByAscending(&User{CreatedAt: time.Now()})
+// Only works with fields that have values set in the entity (non-zero values)
+func (ds *LinqDbSet[T]) OrderByAscending(entity T) *LinqDbSet[T] {
+	log.Printf("[GONTEXT DEBUG] LinqDbSet[%T].OrderByAscending called with entity", *new(T))
+	fieldName := ds.getFirstNonZeroFieldName(entity)
+	if fieldName != "" {
+		return ds.OrderByField(fieldName)
+	}
+	log.Printf("[GONTEXT DEBUG] Warning: No non-zero fields found in entity for OrderByAscending")
+	return ds
+}
+
+// OrderByDescendingEntity - Entity-based descending ordering: context.Users.OrderByDescendingEntity(&User{CreatedAt: time.Now()})
+// Only works with fields that have values set in the entity (non-zero values)  
+func (ds *LinqDbSet[T]) OrderByDescendingEntity(entity T) *LinqDbSet[T] {
+	log.Printf("[GONTEXT DEBUG] LinqDbSet[%T].OrderByDescendingEntity called with entity", *new(T))
+	fieldName := ds.getFirstNonZeroFieldName(entity)
+	if fieldName != "" {
+		return ds.OrderByFieldDescending(fieldName)
+	}
+	log.Printf("[GONTEXT DEBUG] Warning: No non-zero fields found in entity for OrderByDescendingEntity")
+	return ds
+}
+
+// getFirstNonZeroFieldName - helper to extract field name from entity with non-zero value
+func (ds *LinqDbSet[T]) getFirstNonZeroFieldName(entity T) string {
+	entityValue := reflect.ValueOf(entity)
+	entityType := reflect.TypeOf(entity)
+	
+	// Handle pointer
+	if entityType.Kind() == reflect.Ptr {
+		if entityValue.IsNil() {
+			return ""
+		}
+		entityValue = entityValue.Elem()
+		entityType = entityType.Elem()
+	}
+	
+	// Find the first non-zero field
+	for i := 0; i < entityType.NumField(); i++ {
+		field := entityType.Field(i)
+		fieldValue := entityValue.Field(i)
+		
+		// Skip unexported fields
+		if field.PkgPath != "" {
+			continue
+		}
+		
+		// Return the first non-zero field
+		if !fieldValue.IsZero() {
+			log.Printf("[GONTEXT DEBUG] Found non-zero field for ordering: %s", field.Name)
+			return field.Name
+		}
+	}
+	
+	return ""
 }
 
 // ThenByField - EF Core: context.Users.OrderBy(x => x.Field1).ThenBy(x => x.Field2)
@@ -564,10 +917,22 @@ func (ds *LinqDbSet[T]) ThenByFieldDescending(fieldName string) *LinqDbSet[T] {
 
 // EF Core-style CRUD Operations
 
-// Add - EF Core: context.Users.Add(user)
-func (ds *LinqDbSet[T]) Add(entity T) {
+// Add - EF Core style: context.Users.Add(user) - Creates entity in database immediately
+// Returns the created entity and error (if any)
+func (ds *LinqDbSet[T]) Add(entity T) (*T, error) {
+	log.Printf("[GONTEXT DEBUG] LinqDbSet[%T].Add called", *new(T))
+	
+	// Create the entity in the database
+	err := ds.db.Create(&entity).Error
+	if err != nil {
+		log.Printf("[GONTEXT DEBUG] Add failed: %v", err)
+		return nil, err
+	}
+	
+	log.Printf("[GONTEXT DEBUG] Entity added successfully: %+v", entity)
+	
+	// Also track in change tracker if context is available
 	if ds.context != nil {
-		// Use the public AddEntity method
 		ctxValue := reflect.ValueOf(ds.context)
 		if ctxValue.Kind() == reflect.Ptr {
 			addEntityMethod := ctxValue.MethodByName("AddEntity")
@@ -578,13 +943,27 @@ func (ds *LinqDbSet[T]) Add(entity T) {
 			}
 		}
 	}
+	
+	return &entity, nil
 }
 
 // AddRange - EF Core: context.Users.AddRange(users)
-func (ds *LinqDbSet[T]) AddRange(entities []T) {
+// Returns slice of created entities and any errors encountered
+func (ds *LinqDbSet[T]) AddRange(entities []T) ([]*T, error) {
+	log.Printf("[GONTEXT DEBUG] LinqDbSet[%T].AddRange called with %d entities", *new(T), len(entities))
+	
+	var addedEntities []*T
 	for _, entity := range entities {
-		ds.Add(entity)
+		added, err := ds.Add(entity)
+		if err != nil {
+			log.Printf("[GONTEXT DEBUG] AddRange failed on entity: %v", err)
+			return addedEntities, err
+		}
+		addedEntities = append(addedEntities, added)
 	}
+	
+	log.Printf("[GONTEXT DEBUG] AddRange completed successfully: %d entities added", len(addedEntities))
+	return addedEntities, nil
 }
 
 // Update - EF Core: context.Users.Update(user) with GORM-style support
@@ -694,8 +1073,9 @@ func (ds *LinqDbSet[T]) Save(entity interface{}) error {
 	return ds.db.Save(entity).Error
 }
 
-// Create - GORM-style create 
+// Create - GORM-style create - DEPRECATED: Use Add instead for EF Core consistency
 func (ds *LinqDbSet[T]) Create(entity interface{}) error {
+	log.Printf("[GONTEXT DEBUG] Create method called (DEPRECATED - use Add instead)")
 	return ds.db.Create(entity).Error
 }
 
@@ -711,25 +1091,56 @@ func (ds *LinqDbSet[T]) Scan(dest interface{}) error {
 	return ds.db.Scan(dest).Error
 }
 
-// Sum - Calculate sum of a numeric field: ctx.Files.Sum(func(f entities.File) interface{} { return f.Size })
-// For static typing: ctx.Files.SumField("Size") or ctx.Files.Sum(&entities.File.Size) when supported
-func (ds *LinqDbSet[T]) Sum(selector func(T) interface{}) (float64, error) {
-	fieldName := ds.parseFieldSelector(selector)
-	if fieldName == "" {
-		return 0, fmt.Errorf("unable to parse field selector for Sum")
+// Sum - overloaded method that supports multiple patterns:
+// 1. Sum(func(T) interface{}) - field selector function
+// 2. Sum(&entities.Entity{Field: 0}) - entity with field to sum
+func (ds *LinqDbSet[T]) Sum(args ...interface{}) (float64, error) {
+	if len(args) == 0 {
+		return 0, fmt.Errorf("Sum requires at least one argument")
 	}
 	
-	var result float64
-	quotedFieldName := fieldName
-	if ds.translator != nil {
-		quotedFieldName = ds.translator.GetQuotedFieldName(fieldName)
+	// Pattern 1: Function selector Sum(func(T) interface{})
+	if len(args) == 1 {
+		if selector, ok := args[0].(func(T) interface{}); ok {
+			fieldName := ds.parseFieldSelector(selector)
+			if fieldName == "" {
+				return 0, fmt.Errorf("unable to parse field selector for Sum")
+			}
+			
+			var result float64
+			quotedFieldName := fieldName
+			if ds.translator != nil {
+				quotedFieldName = ds.translator.GetQuotedFieldName(fieldName)
+			}
+			
+			err := ds.db.Model(new(T)).Select(fmt.Sprintf("COALESCE(SUM(%s), 0)", quotedFieldName)).Scan(&result).Error
+			return result, err
+		}
+		
+		// Pattern 2: Entity with field to sum Sum(&entities.File{Size: 0})
+		if entityPtr, ok := args[0].(*T); ok {
+			fieldName := ds.getFirstNonZeroFieldName(*entityPtr)
+			if fieldName == "" {
+				return 0, fmt.Errorf("no non-zero field found in entity for Sum")
+			}
+			return ds.SumField(fieldName)
+		}
+		
+		// Check if it's the entity type directly
+		if entity, ok := args[0].(T); ok {
+			fieldName := ds.getFirstNonZeroFieldName(entity)
+			if fieldName == "" {
+				return 0, fmt.Errorf("no non-zero field found in entity for Sum")
+			}
+			return ds.SumField(fieldName)
+		}
 	}
 	
-	err := ds.db.Model(new(T)).Select(fmt.Sprintf("COALESCE(SUM(%s), 0)", quotedFieldName)).Scan(&result).Error
-	return result, err
+	return 0, fmt.Errorf("unsupported argument type for Sum")
 }
 
 // SumField - Calculate sum using field name: ctx.Files.SumField("Size")
+// PREFER: Use the overloaded Sum method instead: Sum(&Entity{Field: 0}) or Sum(func(T) interface{})
 func (ds *LinqDbSet[T]) SumField(fieldName string) (float64, error) {
 	var result float64
 	quotedFieldName := fieldName
@@ -741,24 +1152,48 @@ func (ds *LinqDbSet[T]) SumField(fieldName string) (float64, error) {
 	return result, err
 }
 
-// Average - Calculate average of a numeric field
-func (ds *LinqDbSet[T]) Average(selector func(T) interface{}) (float64, error) {
-	fieldName := ds.parseFieldSelector(selector)
-	if fieldName == "" {
-		return 0, fmt.Errorf("unable to parse field selector for Average")
+// Average - overloaded method that supports multiple patterns:
+// 1. Average(func(T) interface{}) - field selector function
+// 2. Average(&entities.Entity{Field: 0}) - entity with field to average
+func (ds *LinqDbSet[T]) Average(args ...interface{}) (float64, error) {
+	if len(args) == 0 {
+		return 0, fmt.Errorf("Average requires at least one argument")
 	}
 	
-	var result float64
-	quotedFieldName := fieldName
-	if ds.translator != nil {
-		quotedFieldName = ds.translator.GetQuotedFieldName(fieldName)
+	// Pattern 1: Function selector Average(func(T) interface{})
+	if len(args) == 1 {
+		if selector, ok := args[0].(func(T) interface{}); ok {
+			fieldName := ds.parseFieldSelector(selector)
+			if fieldName == "" {
+				return 0, fmt.Errorf("unable to parse field selector for Average")
+			}
+			return ds.AverageField(fieldName)
+		}
+		
+		// Pattern 2: Entity with field to average Average(&entities.File{Size: 0})
+		if entityPtr, ok := args[0].(*T); ok {
+			fieldName := ds.getFirstNonZeroFieldName(*entityPtr)
+			if fieldName == "" {
+				return 0, fmt.Errorf("no non-zero field found in entity for Average")
+			}
+			return ds.AverageField(fieldName)
+		}
+		
+		// Check if it's the entity type directly
+		if entity, ok := args[0].(T); ok {
+			fieldName := ds.getFirstNonZeroFieldName(entity)
+			if fieldName == "" {
+				return 0, fmt.Errorf("no non-zero field found in entity for Average")
+			}
+			return ds.AverageField(fieldName)
+		}
 	}
 	
-	err := ds.db.Model(new(T)).Select(fmt.Sprintf("COALESCE(AVG(%s), 0)", quotedFieldName)).Scan(&result).Error
-	return result, err
+	return 0, fmt.Errorf("unsupported argument type for Average")
 }
 
 // AverageField - Calculate average using field name: ctx.Files.AverageField("Size")
+// PREFER: Use the overloaded Average method instead: Average(&Entity{Field: 0}) or Average(func(T) interface{})
 func (ds *LinqDbSet[T]) AverageField(fieldName string) (float64, error) {
 	var result float64
 	quotedFieldName := fieldName
@@ -770,24 +1205,48 @@ func (ds *LinqDbSet[T]) AverageField(fieldName string) (float64, error) {
 	return result, err
 }
 
-// Min - Find minimum value of a field
-func (ds *LinqDbSet[T]) Min(selector func(T) interface{}) (interface{}, error) {
-	fieldName := ds.parseFieldSelector(selector)
-	if fieldName == "" {
-		return nil, fmt.Errorf("unable to parse field selector for Min")
+// Min - overloaded method that supports multiple patterns:
+// 1. Min(func(T) interface{}) - field selector function
+// 2. Min(&entities.Entity{Field: 0}) - entity with field to find minimum
+func (ds *LinqDbSet[T]) Min(args ...interface{}) (interface{}, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("Min requires at least one argument")
 	}
 	
-	var result interface{}
-	quotedFieldName := fieldName
-	if ds.translator != nil {
-		quotedFieldName = ds.translator.GetQuotedFieldName(fieldName)
+	// Pattern 1: Function selector Min(func(T) interface{})
+	if len(args) == 1 {
+		if selector, ok := args[0].(func(T) interface{}); ok {
+			fieldName := ds.parseFieldSelector(selector)
+			if fieldName == "" {
+				return nil, fmt.Errorf("unable to parse field selector for Min")
+			}
+			return ds.MinField(fieldName)
+		}
+		
+		// Pattern 2: Entity with field to find min Min(&entities.File{Size: 0})
+		if entityPtr, ok := args[0].(*T); ok {
+			fieldName := ds.getFirstNonZeroFieldName(*entityPtr)
+			if fieldName == "" {
+				return nil, fmt.Errorf("no non-zero field found in entity for Min")
+			}
+			return ds.MinField(fieldName)
+		}
+		
+		// Check if it's the entity type directly
+		if entity, ok := args[0].(T); ok {
+			fieldName := ds.getFirstNonZeroFieldName(entity)
+			if fieldName == "" {
+				return nil, fmt.Errorf("no non-zero field found in entity for Min")
+			}
+			return ds.MinField(fieldName)
+		}
 	}
 	
-	err := ds.db.Model(new(T)).Select(fmt.Sprintf("MIN(%s)", quotedFieldName)).Scan(&result).Error
-	return result, err
+	return nil, fmt.Errorf("unsupported argument type for Min")
 }
 
 // MinField - Find minimum value using field name: ctx.Files.MinField("Size")
+// PREFER: Use the overloaded Min method instead: Min(&Entity{Field: 0}) or Min(func(T) interface{})
 func (ds *LinqDbSet[T]) MinField(fieldName string) (interface{}, error) {
 	var result interface{}
 	quotedFieldName := fieldName
@@ -799,24 +1258,48 @@ func (ds *LinqDbSet[T]) MinField(fieldName string) (interface{}, error) {
 	return result, err
 }
 
-// Max - Find maximum value of a field
-func (ds *LinqDbSet[T]) Max(selector func(T) interface{}) (interface{}, error) {
-	fieldName := ds.parseFieldSelector(selector)
-	if fieldName == "" {
-		return nil, fmt.Errorf("unable to parse field selector for Max")
+// Max - overloaded method that supports multiple patterns:
+// 1. Max(func(T) interface{}) - field selector function
+// 2. Max(&entities.Entity{Field: 0}) - entity with field to find maximum
+func (ds *LinqDbSet[T]) Max(args ...interface{}) (interface{}, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("Max requires at least one argument")
 	}
 	
-	var result interface{}
-	quotedFieldName := fieldName
-	if ds.translator != nil {
-		quotedFieldName = ds.translator.GetQuotedFieldName(fieldName)
+	// Pattern 1: Function selector Max(func(T) interface{})
+	if len(args) == 1 {
+		if selector, ok := args[0].(func(T) interface{}); ok {
+			fieldName := ds.parseFieldSelector(selector)
+			if fieldName == "" {
+				return nil, fmt.Errorf("unable to parse field selector for Max")
+			}
+			return ds.MaxField(fieldName)
+		}
+		
+		// Pattern 2: Entity with field to find max Max(&entities.File{Size: 0})
+		if entityPtr, ok := args[0].(*T); ok {
+			fieldName := ds.getFirstNonZeroFieldName(*entityPtr)
+			if fieldName == "" {
+				return nil, fmt.Errorf("no non-zero field found in entity for Max")
+			}
+			return ds.MaxField(fieldName)
+		}
+		
+		// Check if it's the entity type directly
+		if entity, ok := args[0].(T); ok {
+			fieldName := ds.getFirstNonZeroFieldName(entity)
+			if fieldName == "" {
+				return nil, fmt.Errorf("no non-zero field found in entity for Max")
+			}
+			return ds.MaxField(fieldName)
+		}
 	}
 	
-	err := ds.db.Model(new(T)).Select(fmt.Sprintf("MAX(%s)", quotedFieldName)).Scan(&result).Error
-	return result, err
+	return nil, fmt.Errorf("unsupported argument type for Max")
 }
 
 // MaxField - Find maximum value using field name: ctx.Files.MaxField("Size")
+// PREFER: Use the overloaded Max method instead: Max(&Entity{Field: 0}) or Max(func(T) interface{})
 func (ds *LinqDbSet[T]) MaxField(fieldName string) (interface{}, error) {
 	var result interface{}
 	quotedFieldName := fieldName

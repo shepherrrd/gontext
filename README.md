@@ -10,14 +10,17 @@ GoNtext brings the familiar **Entity Framework Core** patterns to Go, providing 
 
 - **🎯 EF Core-Style API**: Familiar patterns for .NET developers
 - **🔍 LINQ Queries**: Type-safe querying with method chaining
+- **🏗️ Entity-based Queries**: GORM-style struct patterns with comparison operators ✨
+- **📊 Enhanced Aggregations**: Entity-based Sum, Average, Min, Max operations ✨
 - **🔗 Include/Select Support**: Load relationships and specific fields
-- **📊 Change Tracking**: Automatic entity change detection
+- **📈 Change Tracking**: Automatic entity change detection
 - **🔄 Migrations**: Code-first database migrations with Go files
 - **💾 DbSets**: Type-safe entity collections with generics
 - **🗃️ Multiple Databases**: PostgreSQL, MySQL, SQLite support
 - **🐘 PostgreSQL Pascal Case**: Automatic field name translation with quoted identifiers
 - **🚀 Zero Configuration**: Automatic database-specific optimizations
 - **⚡ Field Validation**: Runtime validation with clear error messages
+- **🔢 Comparison Operators**: Support for `>`, `<`, `>=`, `<=`, `!=` in all query patterns ✨
 
 ## 🚀 Quick Start
 
@@ -112,6 +115,7 @@ userSet.WhereField("IsActive", true).Delete()
 - ✅ **Column Names**: `Username` field becomes `"Username"` column (Pascal case)
 - ✅ **All Query Types**: INSERT, SELECT, UPDATE, DELETE - all automatically translated
 - ✅ **Complex Queries**: WHERE with AND/OR/parentheses, LIKE, IN - all supported
+- ✅ **Comparison Operators**: Support for `>`, `<`, `>=`, `<=`, `!=` in Where conditions ✨
 - ✅ **Zero Boilerplate**: No `TableName()` methods needed, no manual quoting
 
 ### 🚫 No More TableName() Methods
@@ -135,6 +139,160 @@ type User struct {
 ```
 
 GoNtext automatically uses the struct name (`User`) as the table name with proper PostgreSQL quoting.
+
+## 🔢 Enhanced Query Patterns
+
+**GoNtext supports multiple query patterns for maximum flexibility!**
+
+### 🎯 Field-based Queries with Comparison Operators
+
+```go
+// Age comparisons
+users, _ := ctx.Users.Where("Age", ">18").ToList()         // Age > 18
+users, _ := ctx.Users.Where("Age", ">=21").ToList()        // Age >= 21  
+users, _ := ctx.Users.Where("Age", "<65").ToList()         // Age < 65
+users, _ := ctx.Users.Where("Age", "<=30").ToList()        // Age <= 30
+users, _ := ctx.Users.Where("Age", "!=25").ToList()        // Age != 25
+
+// String comparisons
+users, _ := ctx.Users.Where("Username", "!=admin").ToList() // Username != 'admin'
+
+// Numeric fields
+files, _ := ctx.Files.Where("Size", ">1048576").ToList()   // Size > 1MB
+```
+
+### 🏗️ Entity-based Queries (GORM-style)
+
+```go
+// Static typing with entity structs
+user, _ := ctx.Users.Where(&User{Email: "john@example.com"}).FirstOrDefault()
+
+// Entity-based queries with comparison operators ✨ NEW!
+users, _ := ctx.Users.Where(&User{Age: ">18"}).ToList()           // Age > 18
+files, _ := ctx.Files.Where(&File{Size: ">=1048576"}).ToList()    // Size >= 1MB
+users, _ := ctx.Users.Where(&User{Username: "!=admin"}).ToList()  // Username != 'admin'
+
+// Combined entity patterns
+activeAdults, _ := ctx.Users.Where(&User{IsActive: true, Age: ">=18"}).ToList()
+```
+
+### 🔗 Enhanced OR Operations
+
+```go
+// Field-based OR with operators
+users, _ := ctx.Users.Where("Age", ">=18").Or("Role", "admin").ToList()
+users, _ := ctx.Users.Where("Status", "!=inactive").Or("Priority", ">5").ToList()
+
+// Entity-based OR operations ✨ NEW!
+users, _ := ctx.Users.Where(&User{Role: "admin"}).Or(&User{Age: ">=65"}).ToList()
+users, _ := ctx.Users.Where(&User{Email: "admin@example.com"}).Or(&User{Username: "admin"}).ToList()
+
+// Mixed pattern OR operations
+users, _ := ctx.Users.Where("IsActive", true).Or(&User{Role: "admin"}).ToList()
+```
+
+## 📊 Enhanced Aggregations & Ordering
+
+**GoNtext provides multiple patterns for aggregations and ordering!**
+
+### 🧮 Entity-based Aggregations ✨ NEW!
+
+```go
+// Entity-based Sum - specify field using entity pattern
+totalSize, _ := ctx.Files.Sum(&File{Size: 0})                    // Sum file sizes
+totalRevenue, _ := ctx.Orders.Sum(&Order{Amount: 0.0})           // Sum order amounts
+
+// Entity-based Average  
+avgAge, _ := ctx.Users.Average(&User{Age: 0})                    // Average user age
+avgRating, _ := ctx.Products.Average(&Product{Rating: 0.0})      // Average product rating
+
+// Entity-based Min/Max
+minPrice, _ := ctx.Products.Min(&Product{Price: 0.0})            // Minimum price
+maxScore, _ := ctx.GameResults.Max(&GameResult{Score: 0})        // Maximum score
+
+// Chain with WHERE conditions
+totalAdultAge, _ := ctx.Users.Where("Age", ">=18").Sum(&User{Age: 0})
+avgActiveUserAge, _ := ctx.Users.Where(&User{IsActive: true}).Average(&User{Age: 0})
+```
+
+### 📈 Traditional Field-based Aggregations
+
+```go
+// Field name aggregations (backward compatible)
+totalSize, _ := ctx.Files.SumField("Size")
+avgAge, _ := ctx.Users.AverageField("Age")  
+minPrice, _ := ctx.Products.MinField("Price")
+maxScore, _ := ctx.GameResults.MaxField("Score")
+
+// With comparison operators
+expensiveItemsTotal, _ := ctx.Products.Where("Price", ">100").SumField("Price")
+youngUsersAvgAge, _ := ctx.Users.Where("Age", "<25").AverageField("Age")
+```
+
+### 🔄 Enhanced Ordering Operations
+
+```go
+// Multiple ordering patterns
+users, _ := ctx.Users.OrderBy("Name").ToList()                     // String field name
+users, _ := ctx.Users.OrderBy(func(u User) interface{} {            // Function selector
+    return u.CreatedAt 
+}).ToList()
+
+// Descending order
+users, _ := ctx.Users.OrderByDescending("Age").ToList()             // String field name  
+users, _ := ctx.Users.OrderByDescending(func(u User) interface{} {  // Function selector
+    return u.LastLogin 
+}).ToList()
+
+// Entity-based ordering (uses first non-zero field)
+users, _ := ctx.Users.OrderByAscending(&User{Name: "placeholder"}).ToList()
+users, _ := ctx.Users.OrderByDescendingEntity(&User{CreatedAt: time.Now()}).ToList()
+
+// Chain with other operations
+topSpenders, _ := ctx.Users.
+    Where("IsActive", true).
+    OrderByDescending("TotalSpent").
+    Take(10).
+    ToList()
+```
+
+### 🎯 Real-world Examples
+
+```go
+// E-commerce analytics
+type Product struct {
+    ID          uint    `gorm:"primaryKey"`
+    Name        string  `gorm:"not null"`
+    Price       float64 `gorm:"not null"`
+    Rating      float64 `gorm:"default:0"`
+    InStock     bool    `gorm:"default:true"`
+    CategoryID  uint    `gorm:"not null"`
+}
+
+// Get total inventory value for in-stock premium products
+inventoryValue, _ := ctx.Products.
+    Where(&Product{InStock: true}).
+    Where("Price", ">50").
+    Sum(&Product{Price: 0.0})
+
+// Find average rating of highly-rated products
+avgRating, _ := ctx.Products.
+    Where("Rating", ">=4.0").
+    Average(&Product{Rating: 0.0})
+
+// Get top 5 most expensive products by category
+topProducts, _ := ctx.Products.
+    Where(&Product{CategoryID: 1}).
+    OrderByDescending("Price").
+    Take(5).
+    ToList()
+
+// Complex aggregation with OR conditions
+totalValue, _ := ctx.Products.
+    Where("Rating", ">=4.5").
+    Or(&Product{InStock: true}).
+    Sum(&Product{Price: 0.0})
+```
 
 ## 🔗 Include & Select - Loading Relationships
 
@@ -438,29 +596,37 @@ GoNtext brings the best of Entity Framework Core to Go!
 
 | EF Core (C#)                                    | GoNtext (Go)                                               |
 | ----------------------------------------------- | ---------------------------------------------------------- |
-| `context.Users.Add(user)`                       | `ctx.Users.Add(user); ctx.SaveChanges()`                   |
+| `context.Users.Add(user)`                       | `ctx.Users.Add(user)`                                      |
 | `context.SaveChanges()`                         | `ctx.SaveChanges()`                                        |
-| `context.Users.Where(x => x.IsActive).ToList()` | `ctx.Users.WhereField("IsActive", true).ToList()`          |
+| `context.Users.Where(x => x.IsActive).ToList()` | `ctx.Users.Where("IsActive", true).ToList()`               |
 | `context.Users.Where(x => x.IsActive).ToList()` | `ctx.Users.Where(&User{IsActive: true}).ToList()` ✨       |
 | `context.Users.FirstOrDefault(x => x.Id == id)` | `ctx.Users.ById(id)`                                       |
-| `context.Users.FirstOrDefault(x => x.Id == id)` | `ctx.Users.First(&User{Id: id})` ✨                        |
-| `context.Users.OrderBy(x => x.Email)`           | `ctx.Users.OrderByField("Email")`                          |
+| `context.Users.FirstOrDefault(x => x.Id == id)` | `ctx.Users.Where(&User{Id: id}).FirstOrDefault()` ✨       |
+| `context.Users.OrderBy(x => x.Email)`           | `ctx.Users.OrderBy("Email")`                               |
+| `context.Users.Where(x => x.Age > 18)`          | `ctx.Users.Where("Age", ">18")` ✨                         |
+| `context.Users.Where(x => x.Age > 18)`          | `ctx.Users.Where(&User{Age: ">18"})` ✨ **NEW!**          |
+| `context.Orders.Sum(x => x.Amount)`             | `ctx.Orders.Sum(&Order{Amount: 0.0})` ✨ **NEW!**         |
+| `context.Users.Average(x => x.Age)`             | `ctx.Users.Average(&User{Age: 0})` ✨ **NEW!**            |
 | Pascal case tables (`Users`)                    | Pascal case tables (`"User"`) ✨                           |
 | Pascal case columns (`IsActive`)                | Pascal case columns (`"IsActive"`) ✨                      |
 | `[Table("app_users")] class User`               | `func (User) TableName() string { return "app_users" }` ✨ |
 
-### GORM vs GoNtext
+### Traditional GORM vs GoNtext
 
-| GORM (Go)                                                                | GoNtext (Go)                                                                        |
-| ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------- |
-| `db.Where(&User{Email: "test"}).First(&user)`                            | `ctx.Users.Where(&User{Email: "test"}).FirstOrDefault()` ✨                         |
-| `db.Where("email = ?", email).Or("username = ?", username).First(&user)` | `ctx.Users.Where("Email", email).OrField("Username", username).FirstOrDefault()` ✨ |
-| `db.Create(&user)`                                                       | `ctx.Users.Create(&user)` ✨                                                        |
-| `db.Save(&user)`                                                         | `ctx.Users.Save(&user)` ✨                                                          |
-| `db.First(&user, id)`                                                    | `ctx.Users.Find(id)` ✨                                                             |
-| Manual change tracking                                                   | Automatic change tracking ✨                                                        |
-| Manual migrations                                                        | Code-first migrations ✨                                                            |
-| Snake_case by default                                                    | Pascal case with PostgreSQL ✨                                                      |
+| Traditional GORM (Go)                                                     | GoNtext (Go)                                                                     |
+| ------------------------------------------------------------------------ | ------------------------------------------------------------------------------- |
+| `db.Where(&User{Email: "test"}).First(&user)`                            | `ctx.Users.Where(&User{Email: "test"}).FirstOrDefault()` ✨                     |
+| `db.Where("email = ?", email).Or("username = ?", username).First(&user)` | `ctx.Users.Where("Email", email).Or("Username", username).FirstOrDefault()` ✨  |
+| `db.Where("age > ?", 18).Find(&users)`                                  | `ctx.Users.Where("Age", ">18").ToList()` ✨                                    |
+| `db.Where("age > ?", 18).Find(&users)`                                  | `ctx.Users.Where(&User{Age: ">18"}).ToList()` ✨ **NEW!**                     |
+| `db.Create(&user)`                                                       | `ctx.Users.Add(user)` ✨ (EF Core style)                                       |
+| `db.Save(&user)`                                                         | `ctx.Users.Save(&user)` ✨                                                      |
+| `db.First(&user, id)`                                                    | `ctx.Users.Find(id)` ✨                                                         |
+| `db.Model(&Order{}).Select("SUM(amount)").Scan(&total)`                 | `ctx.Orders.Sum(&Order{Amount: 0.0})` ✨ **NEW!**                             |
+| `db.Model(&User{}).Select("AVG(age)").Scan(&avg)`                       | `ctx.Users.Average(&User{Age: 0})` ✨ **NEW!**                                |
+| Manual change tracking                                                   | Automatic change tracking ✨                                                    |
+| Manual migrations                                                        | Code-first migrations ✨                                                        |
+| Snake_case by default                                                    | Pascal case with PostgreSQL ✨                                                  |
 
 ### 🎯 Best of Both Worlds
 
