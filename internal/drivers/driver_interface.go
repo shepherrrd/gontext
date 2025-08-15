@@ -8,6 +8,7 @@ import (
 type DatabaseDriver interface {
 	Name() string
 	Connect(connectionString string) (*gorm.DB, error)
+	ConnectWithLogger(connectionString string, logLevel string) (*gorm.DB, error)
 	GetSQLDB(db *gorm.DB) (*sql.DB, error)
 	MapGoTypeToSQL(goType string) string
 	SupportsTransactions() bool

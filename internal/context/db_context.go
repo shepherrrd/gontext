@@ -31,11 +31,11 @@ type DbContext struct {
 type DbContextOptions struct {
 	ConnectionString string
 	Driver          drivers.DatabaseDriver
-	LogLevel        int
+	LogLevel        string
 }
 
 func NewDbContext(options DbContextOptions) (*DbContext, error) {
-	db, err := options.Driver.Connect(options.ConnectionString)
+	db, err := options.Driver.ConnectWithLogger(options.ConnectionString, options.LogLevel)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
@@ -96,6 +96,9 @@ func (ctx *DbContext) GetDbSet(entityType reflect.Type) *DbSet {
 }
 
 func (ctx *DbContext) SaveChanges() error {
+	// Automatically detect changes before saving
+	ctx.changeTracker.DetectChanges()
+	
 	return ctx.db.Transaction(func(tx *gorm.DB) error {
 		for _, changes := range ctx.changeTracker.GetChanges() {
 			entity := changes.Entity
@@ -190,4 +193,9 @@ func (ctx *DbContext) UpdateEntity(entity interface{}) {
 // RemoveEntity marks an entity for deletion
 func (ctx *DbContext) RemoveEntity(entity interface{}) {
 	ctx.changeTracker.Add(entity, EntityDeleted)
+}
+
+// TrackLoaded tracks an entity that was loaded from the database
+func (ctx *DbContext) TrackLoaded(entity interface{}) {
+	ctx.changeTracker.TrackLoaded(entity)
 }

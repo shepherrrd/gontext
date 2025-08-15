@@ -2,10 +2,14 @@ package drivers
 
 import (
 	"database/sql"
+	"log"
+	"os"
 	"strings"
+	"time"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 	"github.com/shepherrrd/gontext/internal/query"
 )
 
@@ -24,11 +28,53 @@ func (p *PostgreSQLDriver) Name() string {
 }
 
 func (p *PostgreSQLDriver) Connect(connectionString string) (*gorm.DB, error) {
+	return p.ConnectWithLogger(connectionString, "silent") // Default to Silent
+}
+
+func (p *PostgreSQLDriver) ConnectWithLogger(connectionString string, logLevel string) (*gorm.DB, error) {
 	// Create PostgreSQL naming strategy for Pascal case
 	namingStrategy := query.NewPostgreSQLNamingStrategy()
 	
+	// Configure GORM logger based on log level
+	var gormLogger logger.Interface
+	switch logLevel {
+	case "info": // Info level - shows SQL queries
+		gormLogger = logger.New(
+			log.New(os.Stdout, "\r\n", log.LstdFlags), // io writer
+			logger.Config{
+				SlowThreshold:             time.Second,   // Slow SQL threshold
+				LogLevel:                  logger.Info,   // Log level: Info shows all SQL
+				IgnoreRecordNotFoundError: true,          // Ignore ErrRecordNotFound error for logger
+				Colorful:                  true,          // Enable color
+			},
+		)
+	case "warn": // Warn level - shows slow queries and errors
+		gormLogger = logger.New(
+			log.New(os.Stdout, "\r\n", log.LstdFlags),
+			logger.Config{
+				SlowThreshold:             time.Second,
+				LogLevel:                  logger.Warn,
+				IgnoreRecordNotFoundError: true,
+				Colorful:                  true,
+			},
+		)
+	case "error": // Error level - shows only errors
+		gormLogger = logger.New(
+			log.New(os.Stdout, "\r\n", log.LstdFlags),
+			logger.Config{
+				SlowThreshold:             time.Second,
+				LogLevel:                  logger.Error,
+				IgnoreRecordNotFoundError: true,
+				Colorful:                  true,
+			},
+		)
+	default: // Silent
+		gormLogger = logger.Default.LogMode(logger.Silent)
+	}
+	
 	db, err := gorm.Open(postgres.Open(connectionString), &gorm.Config{
 		NamingStrategy: namingStrategy,
+		Logger:         gormLogger,
 	})
 	
 	if err != nil {

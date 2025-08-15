@@ -386,9 +386,9 @@ func (ds *PostgreSQLLinqDbSet[T]) OrEntity(entity T) *PostgreSQLLinqDbSet[T] {
 	return ds
 }
 
-// Include - Type-safe Include with field name validation: context.Users.Include("Buckets", "Sessions")
-func (ds *PostgreSQLLinqDbSet[T]) Include(fieldNames ...string) *PostgreSQLLinqDbSet[T] {
-	newLinqDbSet := ds.LinqDbSet.Include(fieldNames...)
+// Include - Type-safe Include supporting both string names and pointer-based navigation properties
+func (ds *PostgreSQLLinqDbSet[T]) Include(args ...interface{}) *PostgreSQLLinqDbSet[T] {
+	newLinqDbSet := ds.LinqDbSet.Include(args...)
 	
 	return &PostgreSQLLinqDbSet[T]{
 		LinqDbSet:  newLinqDbSet,

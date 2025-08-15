@@ -122,6 +122,10 @@ func (ds *DbSet) FirstOrDefault(conditions ...interface{}) (interface{}, error) 
 	}
 	
 	log.Printf("[GONTEXT DEBUG] Record found: %+v", result)
+	
+	// Automatically track the loaded entity for change detection
+	ds.context.changeTracker.TrackLoaded(result)
+	
 	return result, nil
 }
 
@@ -135,6 +139,10 @@ func (ds *DbSet) First(conditions ...interface{}) (interface{}, error) {
 	}
 	
 	err := query.First(&result).Error
+	if err == nil {
+		// Automatically track the loaded entity for change detection
+		ds.context.changeTracker.TrackLoaded(result)
+	}
 	return result, err
 }
 
@@ -159,7 +167,11 @@ func (ds *DbSet) Single(conditions ...interface{}) (interface{}, error) {
 		return nil, fmt.Errorf("sequence contains more than one element")
 	}
 	
-	return results[0], nil
+	result := results[0]
+	// Automatically track the loaded entity for change detection
+	ds.context.changeTracker.TrackLoaded(result)
+	
+	return result, nil
 }
 
 // Any - EF Core style method

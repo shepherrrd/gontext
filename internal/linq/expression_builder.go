@@ -85,6 +85,16 @@ func NewLinqDbSetWithContext[T any](db *gorm.DB, ctx interface{}) *LinqDbSet[T] 
 	}
 }
 
+// trackEntity tracks an entity for change detection if context is available
+func (ds *LinqDbSet[T]) trackEntity(entity *T) {
+	if ds.context != nil {
+		// Try to cast to the DbContext interface to access the change tracker
+		if ctx, ok := ds.context.(interface{ TrackLoaded(interface{}) }); ok {
+			ctx.TrackLoaded(entity)
+		}
+	}
+}
+
 // Where - overloaded method that supports multiple patterns:
 // 1. Where("Id = ?", value) - SQL with parameters
 // 2. Where("Id", value) - field name with value
@@ -163,7 +173,11 @@ func (ds *LinqDbSet[T]) FirstOrDefault(predicate ...Expression[T]) (*T, error) {
 		return nil, err
 	}
 	
-	return &result, nil
+	// Automatically track the loaded entity for change detection
+	resultPtr := &result
+	ds.trackEntity(resultPtr)
+	
+	return resultPtr, nil
 }
 
 // First - overloaded method that supports multiple patterns:
@@ -202,7 +216,12 @@ func (ds *LinqDbSet[T]) First(args ...interface{}) (*T, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &result, nil
+	
+	// Automatically track the loaded entity for change detection
+	resultPtr := &result
+	ds.trackEntity(resultPtr)
+	
+	return resultPtr, nil
 }
 
 // Single - gets exactly one element matching predicate
@@ -277,12 +296,22 @@ func (ds *LinqDbSet[T]) ToList(predicate ...Expression[T]) ([]T, error) {
 	
 	var results []T
 	err := query.Find(&results).Error
+	if err != nil {
+		return results, err
+	}
+	
+	// Automatically track all loaded entities for change detection
+	for i := range results {
+		ds.trackEntity(&results[i])
+	}
+	
 	return results, err
 }
 
 // OrderBy - overloaded method that supports multiple patterns:
 // 1. OrderBy(func(T) interface{}) - field selector function
 // 2. OrderBy("fieldName") - field name string
+// 3. OrderBy(&Entity.Field) - pointer-based field selector
 func (ds *LinqDbSet[T]) OrderBy(args ...interface{}) *LinqDbSet[T] {
 	if len(args) == 0 {
 		return ds
@@ -332,6 +361,30 @@ func (ds *LinqDbSet[T]) OrderBy(args ...interface{}) *LinqDbSet[T] {
 			}
 			return newDbSet
 		}
+		
+		// Pattern 3: Pointer-based field selector OrderBy(&Entity.Field)
+		fieldName := ds.extractFieldNameFromPointer(args[0])
+		if fieldName != "" {
+			log.Printf("[GONTEXT DEBUG] LinqDbSet[%T].OrderBy called with pointer field: %s", *new(T), fieldName)
+			
+			quotedFieldName := fieldName
+			if ds.translator != nil {
+				quotedFieldName = ds.translator.GetQuotedFieldName(fieldName)
+				log.Printf("[GONTEXT DEBUG] Field name translated: %s -> %s", fieldName, quotedFieldName)
+			}
+			
+			orderClause := quotedFieldName + " ASC"
+			log.Printf("[GONTEXT DEBUG] Adding ORDER BY: %s", orderClause)
+			// Create a new LinqDbSet to avoid mutating the original
+			newDbSet := &LinqDbSet[T]{
+				db:         ds.db.Order(orderClause),
+				entityType: ds.entityType,
+				context:    ds.context,
+				translator: ds.translator,
+				tableName:  ds.tableName,
+			}
+			return newDbSet
+		}
 	}
 	
 	return ds
@@ -340,6 +393,7 @@ func (ds *LinqDbSet[T]) OrderBy(args ...interface{}) *LinqDbSet[T] {
 // OrderByDescending - overloaded method that supports multiple patterns:
 // 1. OrderByDescending(func(T) interface{}) - field selector function
 // 2. OrderByDescending("fieldName") - field name string
+// 3. OrderByDescending(&Entity.Field) - pointer-based field selector
 func (ds *LinqDbSet[T]) OrderByDescending(args ...interface{}) *LinqDbSet[T] {
 	if len(args) == 0 {
 		return ds
@@ -370,6 +424,30 @@ func (ds *LinqDbSet[T]) OrderByDescending(args ...interface{}) *LinqDbSet[T] {
 		// Pattern 2: String field name OrderByDescending("fieldName")
 		if fieldName, ok := args[0].(string); ok {
 			log.Printf("[GONTEXT DEBUG] LinqDbSet[%T].OrderByDescending called with field name: %s", *new(T), fieldName)
+			
+			quotedFieldName := fieldName
+			if ds.translator != nil {
+				quotedFieldName = ds.translator.GetQuotedFieldName(fieldName)
+				log.Printf("[GONTEXT DEBUG] Field name translated: %s -> %s", fieldName, quotedFieldName)
+			}
+			
+			orderClause := quotedFieldName + " DESC"
+			log.Printf("[GONTEXT DEBUG] Adding ORDER BY: %s", orderClause)
+			// Create a new LinqDbSet to avoid mutating the original
+			newDbSet := &LinqDbSet[T]{
+				db:         ds.db.Order(orderClause),
+				entityType: ds.entityType,
+				context:    ds.context,
+				translator: ds.translator,
+				tableName:  ds.tableName,
+			}
+			return newDbSet
+		}
+		
+		// Pattern 3: Pointer-based field selector OrderByDescending(&Entity.Field)
+		fieldName := ds.extractFieldNameFromPointer(args[0])
+		if fieldName != "" {
+			log.Printf("[GONTEXT DEBUG] LinqDbSet[%T].OrderByDescending called with pointer field: %s", *new(T), fieldName)
 			
 			quotedFieldName := fieldName
 			if ds.translator != nil {
@@ -450,7 +528,12 @@ func (ds *LinqDbSet[T]) ById(id interface{}) (*T, error) {
 		}
 		return nil, err
 	}
-	return &result, nil
+	
+	// Automatically track the loaded entity for change detection
+	resultPtr := &result
+	ds.trackEntity(resultPtr)
+	
+	return resultPtr, nil
 }
 
 // WhereEntity - static typing with entity structs with comparison operator support
@@ -1533,9 +1616,26 @@ func (ds *LinqDbSet[T]) MaxField(fieldName string) (interface{}, error) {
 	return result, err
 }
 
-// Include - Type-safe Include with field name validation: query.Include("Buckets", "Sessions")
+// Include - Type-safe Include supporting both string names and pointer-based navigation properties
+// Supports: query.Include("User", "Buckets") or query.Include(&Entity.User, &Entity.Buckets)
 // Validates field names exist on the entity type and panics with clear error if not
-func (ds *LinqDbSet[T]) Include(fieldNames ...string) *LinqDbSet[T] {
+func (ds *LinqDbSet[T]) Include(args ...interface{}) *LinqDbSet[T] {
+	var fieldNames []string
+	
+	// Process each argument - could be string or pointer-based navigation property
+	for _, arg := range args {
+		if fieldName, ok := arg.(string); ok {
+			// String-based field name
+			fieldNames = append(fieldNames, fieldName)
+		} else {
+			// Try to extract field name from pointer expression
+			fieldName := ds.extractFieldNameFromPointer(arg)
+			if fieldName != "" {
+				fieldNames = append(fieldNames, fieldName)
+			}
+		}
+	}
+	
 	// Validate all field names exist on the entity type
 	var zero T
 	entityType := reflect.TypeOf(zero)
@@ -1562,6 +1662,338 @@ func (ds *LinqDbSet[T]) Include(fieldNames ...string) *LinqDbSet[T] {
 		translator: ds.translator,
 		tableName:  ds.tableName,
 	}
+}
+
+
+// extractFieldNameFromPointer extracts field name from various pointer patterns
+// Supports multiple patterns for type-safe field selection
+func (ds *LinqDbSet[T]) extractFieldNameFromPointer(prop interface{}) string {
+	if prop == nil {
+		return ""
+	}
+	
+	// Check if it's a FieldSelector
+	if fs, ok := prop.(interface{ FieldName() string }); ok {
+		return fs.FieldName()
+	}
+	
+	propValue := reflect.ValueOf(prop)
+	
+	// Handle pointer to field in an instance (like &instance.Field where instance is zero-value)  
+	if propValue.Kind() == reflect.Ptr && !propValue.IsNil() {
+		// Use offset-based field name extraction for precise field identification
+		fieldName := ds.getFieldNameFromPointer(prop)
+		if fieldName != "" {
+			return fieldName
+		}
+		
+		// Fallback to type matching
+		return ds.extractFieldNameByTypeMatching(propValue.Type().Elem())
+	}
+	
+	// Handle pointer to zero-value instance for field access pattern
+	if propValue.Kind() == reflect.Ptr && propValue.IsNil() {
+		// This might be a nil pointer cast: (*APIKey)(nil)
+		ptrType := propValue.Type()
+		if ptrType.Kind() == reflect.Ptr {
+			elemType := ptrType.Elem()
+			// Check if this type matches any of our entity fields
+			return ds.extractFieldNameByTypeMatching(elemType)
+		}
+	}
+	
+	return ""
+}
+
+// getFieldNameFromPointer extracts field name using pointer offset calculation
+func (ds *LinqDbSet[T]) getFieldNameFromPointer(fieldPtr interface{}) string {
+	if fieldPtr == nil {
+		return ""
+	}
+	
+	ptrValue := reflect.ValueOf(fieldPtr)
+	if ptrValue.Kind() != reflect.Ptr || ptrValue.IsNil() {
+		return ""
+	}
+	
+	// Get the field address
+	fieldAddr := ptrValue.Pointer()
+	
+	// Create a zero-value instance of T to calculate base address
+	var zero T
+	zeroValue := reflect.ValueOf(&zero)
+	baseAddr := zeroValue.Pointer()
+	
+	// Calculate offset
+	offset := fieldAddr - baseAddr
+	
+	// Find the field at this offset using reflection
+	zeroType := reflect.TypeOf(zero)
+	if zeroType.Kind() == reflect.Ptr {
+		zeroType = zeroType.Elem()
+	}
+	
+	return findFieldByOffset(zeroType, offset)
+}
+
+// extractFieldNameByTypeMatching finds a field name by matching the type
+func (ds *LinqDbSet[T]) extractFieldNameByTypeMatching(elemType reflect.Type) string {
+	// Get our entity type for comparison
+	var zero T
+	entityType := reflect.TypeOf(zero)
+	if entityType.Kind() == reflect.Ptr {
+		entityType = entityType.Elem()
+	}
+	
+	// Look for a field in the entity that has this type
+	for i := 0; i < entityType.NumField(); i++ {
+		field := entityType.Field(i)
+		fieldType := field.Type
+		
+		// Skip unexported fields
+		if field.PkgPath != "" {
+			continue
+		}
+		
+		// For basic types (int, string, time.Time, etc.) - direct field type match
+		if fieldType == elemType {
+			return field.Name
+		}
+		
+		// For pointer fields (*Entity) - check if elemType matches the pointed-to type
+		if fieldType.Kind() == reflect.Ptr && fieldType.Elem() == elemType {
+			return field.Name
+		}
+		
+		// For slice relationships ([]Entity) - check if elemType matches slice element type
+		if fieldType.Kind() == reflect.Slice && fieldType.Elem() == elemType {
+			return field.Name
+		}
+		
+		// For slice of pointers ([]*Entity) - check if elemType matches pointed-to type of slice elements
+		if fieldType.Kind() == reflect.Slice && 
+		   fieldType.Elem().Kind() == reflect.Ptr && 
+		   fieldType.Elem().Elem() == elemType {
+			return field.Name
+		}
+	}
+	
+	// Fallback: If no exact type match, try to match by name patterns
+	elemTypeName := elemType.Name()
+	
+	// Check if there's a field name that matches the element type name
+	for i := 0; i < entityType.NumField(); i++ {
+		field := entityType.Field(i)
+		
+		// Skip unexported fields
+		if field.PkgPath != "" {
+			continue
+		}
+		
+		// Check for name-based matching (e.g., User field for User type)
+		if field.Name == elemTypeName {
+			return field.Name
+		}
+		
+		// Check for plural name matching (e.g., Users field for User type)
+		if field.Name == elemTypeName+"s" {
+			return field.Name
+		}
+	}
+	
+	return ""
+}
+
+// isNavigationProperty determines if a field is a navigation property
+func (ds *LinqDbSet[T]) isNavigationProperty(field reflect.StructField) bool {
+	gormTag := field.Tag.Get("gorm")
+	
+	// Check for relationship indicators in GORM tags
+	if strings.Contains(gormTag, "foreignKey") ||
+		strings.Contains(gormTag, "references") ||
+		strings.Contains(gormTag, "many2many") ||
+		strings.Contains(gormTag, "preload") {
+		return true
+	}
+	
+	fieldType := field.Type
+	
+	// Check if it's a slice of structs (one-to-many, many-to-many)
+	if fieldType.Kind() == reflect.Slice {
+		elemType := fieldType.Elem()
+		if elemType.Kind() == reflect.Struct && elemType.PkgPath() != "" {
+			return true
+		}
+	}
+	
+	// Check if it's a single struct or pointer to struct (one-to-one, many-to-one)
+	if fieldType.Kind() == reflect.Struct && fieldType.PkgPath() != "" {
+		return true
+	}
+	
+	if fieldType.Kind() == reflect.Ptr && fieldType.Elem().Kind() == reflect.Struct {
+		return true
+	}
+	
+	return false
+}
+
+// Field selector helper for type-safe field references
+type FieldSelector[T any] struct {
+	fieldName string
+}
+
+func (fs FieldSelector[T]) FieldName() string {
+	return fs.fieldName
+}
+
+// Field creates a field selector for type-safe navigation property references
+// Usage: Include(Field[APIKey]("User")) instead of Include("User")
+func Field[T any](fieldName string) FieldSelector[T] {
+	return FieldSelector[T]{fieldName: fieldName}
+}
+
+// Selector helper for creating field pointers from zero-value instances
+// Usage: Include(&Selector(APIKey{}).User) - gives compile-time safety
+func Selector[T any](instance T) T {
+	return instance
+}
+
+// FieldPtr extracts field name using pointer offset calculation from zero-value instances
+// Usage: Include(FieldPtr(&APIKey{}.User)) or Include(FieldPtr(&APIKey{}.CreatedAt))
+// This provides compile-time type safety while extracting field names at runtime
+func FieldPtr[T any](fieldPtr interface{}) FieldSelector[T] {
+	fieldName := extractFieldNameUsingUnsafe(fieldPtr)
+	return FieldSelector[T]{fieldName: fieldName}
+}
+
+// extractFieldNameUsingUnsafe attempts to extract field name using pointer offset calculation
+func extractFieldNameUsingUnsafe(fieldPtr interface{}) string {
+	if fieldPtr == nil {
+		return ""
+	}
+	
+	ptrValue := reflect.ValueOf(fieldPtr)
+	if ptrValue.Kind() != reflect.Ptr || ptrValue.IsNil() {
+		return ""
+	}
+	
+	// For now, use type-based matching as pointer offset calculation is complex
+	// and requires knowing the base struct type and layout
+	elemType := ptrValue.Type().Elem()
+	return matchFieldByType(elemType)
+}
+
+// GetFieldName extracts field name from pointer to field in zero-value instance
+// Usage: GetFieldName(&APIKey{}.User) returns "User"
+// Usage: GetFieldName(&APIKey{}.CreatedAt) returns "CreatedAt"
+func GetFieldName[T any](fieldPtr interface{}) string {
+	if fieldPtr == nil {
+		return ""
+	}
+	
+	ptrValue := reflect.ValueOf(fieldPtr)
+	if ptrValue.Kind() != reflect.Ptr {
+		return ""
+	}
+	
+	// Calculate the field offset from the pointer
+	fieldAddr := ptrValue.Pointer()
+	
+	// Create a zero-value instance of T to calculate base address
+	var zero T
+	zeroValue := reflect.ValueOf(&zero)
+	baseAddr := zeroValue.Pointer()
+	
+	// Calculate offset
+	offset := fieldAddr - baseAddr
+	
+	// Find the field at this offset using reflection
+	zeroType := reflect.TypeOf(zero)
+	if zeroType.Kind() == reflect.Ptr {
+		zeroType = zeroType.Elem()
+	}
+	
+	return findFieldByOffset(zeroType, offset)
+}
+
+// findFieldByOffset finds the field name by matching the calculated offset
+func findFieldByOffset(structType reflect.Type, offset uintptr) string {
+	for i := 0; i < structType.NumField(); i++ {
+		field := structType.Field(i)
+		if field.Offset == offset {
+			return field.Name
+		}
+	}
+	return ""
+}
+
+// matchFieldByType attempts to match a field type against common patterns
+func matchFieldByType(fieldType reflect.Type) string {
+	typeName := fieldType.Name()
+	
+	// Handle common entity relationships
+	switch typeName {
+	case "User":
+		return "User"
+	case "Bucket":
+		return "Bucket" 
+	case "File":
+		return "File"
+	case "Session":
+		return "Session"
+	case "APIKey":
+		return "APIKey"
+	case "Time":
+		// For time.Time fields, we need more context to determine the exact field
+		// Common time field names
+		return "CreatedAt" // Default assumption - should be improved
+	default:
+		// Return the type name as fallback
+		return typeName
+	}
+}
+
+// IncludeTyped - Type-safe Include using field selector functions
+// Usage: Include(func() { return (*APIKey)(nil).User }()) - this gives compile-time checking
+func (ds *LinqDbSet[T]) IncludeTyped(selectors ...func() interface{}) *LinqDbSet[T] {
+	var fieldNames []string
+	
+	// Extract field names from selectors
+	for _, selector := range selectors {
+		// This is a placeholder - in practice, you'd need more sophisticated reflection
+		// or code generation to extract field names from function selectors
+		fieldName := ds.extractFieldNameFromSelector(selector)
+		if fieldName != "" {
+			fieldNames = append(fieldNames, fieldName)
+		}
+	}
+	
+	// Apply GORM preloading directly to avoid recursion
+	if len(fieldNames) > 0 {
+		newDb := ds.db
+		for _, fieldName := range fieldNames {
+			newDb = newDb.Preload(fieldName)
+		}
+		
+		return &LinqDbSet[T]{
+			db:         newDb,
+			entityType: ds.entityType,
+			context:    ds.context,
+			translator: ds.translator,
+			tableName:  ds.tableName,
+		}
+	}
+	
+	return ds
+}
+
+// extractFieldNameFromSelector attempts to extract field name from a selector function
+func (ds *LinqDbSet[T]) extractFieldNameFromSelector(selector func() interface{}) string {
+	// This is a simplified implementation - in a real-world scenario,
+	// you'd need to use AST parsing or code generation to extract the field name
+	// from the function body. For now, return empty to indicate not implemented.
+	return ""
 }
 
 

@@ -13,7 +13,7 @@ type DbSet = context.DbSet
 
 type DbContextOptions = context.DbContextOptions
 
-func NewDbContext(connectionString string, driverType string) (*DbContext, error) {
+func NewDbContext(connectionString string, driverType string, logLevel ...string) (*DbContext, error) {
 	var driver drivers.DatabaseDriver
 
 	switch driverType {
@@ -27,9 +27,16 @@ func NewDbContext(connectionString string, driverType string) (*DbContext, error
 		return nil, fmt.Errorf("unsupported driver: %s", driverType)
 	}
 
+	// Default to "silent" if no log level specified
+	level := "silent"
+	if len(logLevel) > 0 {
+		level = logLevel[0]
+	}
+
 	options := DbContextOptions{
 		ConnectionString: connectionString,
 		Driver:          driver,
+		LogLevel:        level,
 	}
 
 	return context.NewDbContext(options)

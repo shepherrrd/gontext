@@ -2,10 +2,14 @@ package drivers
 
 import (
 	"database/sql"
+	"log"
+	"os"
 	"strings"
+	"time"
 
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 type MySQLDriver struct{}
@@ -19,7 +23,50 @@ func (m *MySQLDriver) Name() string {
 }
 
 func (m *MySQLDriver) Connect(connectionString string) (*gorm.DB, error) {
-	return gorm.Open(mysql.Open(connectionString), &gorm.Config{})
+	return m.ConnectWithLogger(connectionString, "silent") // Default to Silent
+}
+
+func (m *MySQLDriver) ConnectWithLogger(connectionString string, logLevel string) (*gorm.DB, error) {
+	// Configure GORM logger based on log level
+	var gormLogger logger.Interface
+	switch logLevel {
+	case "info": // Info level - shows SQL queries
+		gormLogger = logger.New(
+			log.New(os.Stdout, "\r\n", log.LstdFlags),
+			logger.Config{
+				SlowThreshold:             time.Second,
+				LogLevel:                  logger.Info,
+				IgnoreRecordNotFoundError: true,
+				Colorful:                  true,
+			},
+		)
+	case "warn": // Warn level
+		gormLogger = logger.New(
+			log.New(os.Stdout, "\r\n", log.LstdFlags),
+			logger.Config{
+				SlowThreshold:             time.Second,
+				LogLevel:                  logger.Warn,
+				IgnoreRecordNotFoundError: true,
+				Colorful:                  true,
+			},
+		)
+	case "error": // Error level
+		gormLogger = logger.New(
+			log.New(os.Stdout, "\r\n", log.LstdFlags),
+			logger.Config{
+				SlowThreshold:             time.Second,
+				LogLevel:                  logger.Error,
+				IgnoreRecordNotFoundError: true,
+				Colorful:                  true,
+			},
+		)
+	default: // Silent
+		gormLogger = logger.Default.LogMode(logger.Silent)
+	}
+	
+	return gorm.Open(mysql.Open(connectionString), &gorm.Config{
+		Logger: gormLogger,
+	})
 }
 
 func (m *MySQLDriver) GetSQLDB(db *gorm.DB) (*sql.DB, error) {
