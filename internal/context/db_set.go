@@ -32,6 +32,12 @@ func (ds *DbSet) Update(entity interface{}) {
 	ds.context.changeTracker.Add(entity, EntityModified)
 }
 
+func (ds *DbSet) UpdateRange(entities []interface{}) {
+	for _, entity := range entities {
+		ds.context.changeTracker.Add(entity, EntityModified)
+	}
+}
+
 func (ds *DbSet) Remove(entity interface{}) {
 	ds.context.changeTracker.Add(entity, EntityDeleted)
 }

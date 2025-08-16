@@ -333,6 +333,11 @@ func (ds *PostgreSQLLinqDbSet[T]) Update(entity T) error {
 	return ds.LinqDbSet.Update(entity)
 }
 
+// UpdateRange - EF Core: context.StorageNodes.UpdateRange(nodes)
+func (ds *PostgreSQLLinqDbSet[T]) UpdateRange(entities []T) {
+	ds.LinqDbSet.UpdateRange(entities)
+}
+
 // Or - adds OR condition with field name translation
 func (ds *PostgreSQLLinqDbSet[T]) Or(condition string, args ...interface{}) *PostgreSQLLinqDbSet[T] {
 	translatedCondition := ds.translator.TranslateQuery(ds.tableName, condition)
